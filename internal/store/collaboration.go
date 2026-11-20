@@ -44,7 +44,9 @@ func saveCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID string, stat
 
 // RequestClarification reserves domain identities before any human-visible effect.
 // Its exact live Turn fence and operation ledger make retry after a lost response safe.
-func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, operation string, questions []collaboration.Question) (collaboration.Round, error) {
+// preflight must be side-effect-free. It runs after authoritative validation on
+// the complete round, but before saving identities/references or committing.
+func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, operation string, questions []collaboration.Question, preflight func(collaboration.Round) error) (collaboration.Round, error) {
 	var round collaboration.Round
 	var rejection *collaboration.RequestValidationError
 	err := s.withLockedAgentTurnLease(ctx, lease, "reserve clarification", func(tx pgx.Tx, turn lockedTurn) error {
@@ -138,6 +140,11 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 			if state.Rounds[i].ID == round.ID {
 				state.Rounds[i].Introduction = args.Introduction
 				round = state.Rounds[i]
+			}
+		}
+		if preflight != nil {
+			if err = preflight(round); err != nil {
+				return err
 			}
 		}
 		return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)

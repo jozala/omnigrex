@@ -15,6 +15,8 @@ Decisions [0059](0059-return-durable-checkpoint-nonpublication.md) and [0066](00
 
 Return a bounded canonical `status: rejected`, `publication: not_applied` result only after the authoritative request-validation transaction commits its operation-bound receipt.
 Do not allocate a round, reference or artifact for rejected requests.
+Run side-effect-free complete-round render preflight after authoritative question validation but before committing domain identities and references in the same live Turn transaction.
+A preflight failure aborts that transaction; do not commit a round and later delete it or relax immutable-question checks to permit correction.
 For count-only mistakes proven before reservation, commit a fingerprint-bound admission receipt and return the same structural feedback without fabricating a mutation reservation.
 A committed receipt preserves exact replay and rejects corrected content under the old caller identity; an ambiguous receipt commit is not non-admission proof.
 Advertise Role count limits in the tool description rather than `maxItems` in the discovered schema: Pi validates that schema before calling the server, which would otherwise mask actionable feedback in retained bridges.

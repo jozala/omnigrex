@@ -21,11 +21,15 @@ import (
 
 type requestRejectionGitHub struct {
 	replayGatewayGitHub
-	posts int
+	posts     int
+	postError error
 }
 
 func (g *requestRejectionGitHub) CreateIssueComment(_ context.Context, _, _, _ string, _ int, r githubapi.CommentRequest) (githubapi.IssueComment, error) {
 	g.posts++
+	if g.postError != nil {
+		return githubapi.IssueComment{}, g.postError
+	}
 	return githubapi.IssueComment{ID: int64(g.posts), NodeID: "IC_fixture", Body: githubapi.JoinBodyParts(r.Body, r.Marker), HTMLURL: "https://github.test/comment"}, nil
 }
 
@@ -210,7 +214,7 @@ func TestRequestRejectionLostAcknowledgmentAndEarlierUnsettledPublication(t *tes
 	fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 9980, workflow.RoleDeveloper, strings.Repeat("a", 40))
 	qs := []collaboration.Question{{ID: "Q1", Body: "Which policy?"}}
 	earlier := startQuestionRequest(t, database, ctx, lease, "earlier", qs)
-	round, err := database.RequestClarification(ctx, lease, earlier.ID, qs)
+	round, err := database.RequestClarification(ctx, lease, earlier.ID, qs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +222,7 @@ func TestRequestRejectionLostAcknowledgmentAndEarlierUnsettledPublication(t *tes
 		t.Fatal(err)
 	}
 	blocked := startQuestionRequest(t, database, ctx, lease, "blocked", qs)
-	_, err = database.RequestClarification(ctx, lease, blocked.ID, qs)
+	_, err = database.RequestClarification(ctx, lease, blocked.ID, qs, nil)
 	var validation *collaboration.RequestValidationError
 	if !errors.As(err, &validation) || validation.Code != "earlier_publication_unsettled" {
 		t.Fatal(err)
@@ -229,7 +233,7 @@ func TestRequestRejectionLostAcknowledgmentAndEarlierUnsettledPublication(t *tes
 	}
 	// Fresh identities cannot bypass the earlier unsettled publication.
 	fresh := startQuestionRequest(t, database, ctx, lease, "fresh-bypass", qs)
-	if _, err = database.RequestClarification(ctx, lease, fresh.ID, qs); !errors.As(err, &validation) || validation.Code != "earlier_publication_unsettled" {
+	if _, err = database.RequestClarification(ctx, lease, fresh.ID, qs, nil); !errors.As(err, &validation) || validation.Code != "earlier_publication_unsettled" {
 		t.Fatal(err)
 	}
 	if err = database.CompleteMutation(ctx, lease, fresh.ID, result); err != nil {
@@ -245,7 +249,7 @@ func TestRequestRejectionLostAcknowledgmentAndEarlierUnsettledPublication(t *tes
 	if other, err := database.GetRequestRejection(ctx, fixture.workflowID, lease.AgentParticipantID, lease.ID, lease.ExecutionEpoch+1, blocked.ID); err != nil || other != nil {
 		t.Fatal(other, err)
 	}
-	if _, err = database.RequestClarification(ctx, lease, blocked.ID, qs); err == nil {
+	if _, err = database.RequestClarification(ctx, lease, blocked.ID, qs, nil); err == nil {
 		t.Fatal("unknown request reapplied")
 	}
 	if err = database.ConfirmClarificationPublication(ctx, fixture.workflowID, round.ID, collaboration.Source{Channel: "fixture", ID: "published"}); err != nil {
@@ -294,7 +298,7 @@ func TestRequestRejectionAloneCannotEstablishWaiting(t *testing.T) {
 	fixture, lease, _ := prepareOpenSettlementTurn(t, database, pool, ctx, 9981, workflow.RoleDeveloper, strings.Repeat("a", 40))
 	qs := []collaboration.Question{{ID: "duplicate", Body: "First?"}, {ID: "duplicate", Body: "Second?"}}
 	bad := startQuestionRequest(t, database, ctx, lease, "only-rejection", qs)
-	_, err := database.RequestClarification(ctx, lease, bad.ID, qs)
+	_, err := database.RequestClarification(ctx, lease, bad.ID, qs, nil)
 	var validation *collaboration.RequestValidationError
 	if !errors.As(err, &validation) {
 		t.Fatal(err)
@@ -416,5 +420,81 @@ func TestRequestRejectionGatewayAncestorReplayAcrossCheckoutHeads(t *testing.T) 
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestClarificationRenderPreflightDoesNotClaimQuestionIdentities(t *testing.T) {
+	databases, pool := openPhaseFiveStores(t, 1)
+	database := databases[0]
+	ctx := t.Context()
+	fixture := seedAgentSession(t, pool, 9992)
+	_, lease, execution := acquireReplayGatewayTurn(t, database, pool, fixture, store.AgentTurn{}, "preflight-root")
+	api := &requestRejectionGitHub{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: replayGatewayCredentials{}, Publisher: &replayGatewayPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: database})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway, registration := openReplayGateway(t, database, backend, replayGatewayScope(lease, execution, strings.Repeat("a", 40)))
+	questions := make([]collaboration.Question, 9)
+	for i := range questions {
+		questions[i] = collaboration.Question{ID: fmt.Sprintf("Q%d", i+1), Body: strings.Repeat("x", 8000)}
+	}
+	args := map[string]any{"operation_id": "too-large", "questions": questions}
+	first := callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, args, true)
+	if !strings.Contains(first, "invalid tool invocation") {
+		t.Fatal(first)
+	}
+	if replay := callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, args, true); replay != first {
+		t.Fatal("failed preflight replay changed", replay, first)
+	}
+	readState := func() collaboration.State {
+		t.Helper()
+		var raw []byte
+		if err := pool.QueryRow(ctx, `SELECT COALESCE((SELECT state FROM work_item_collaboration WHERE workflow_id=$1),'{}'::jsonb)`, fixture.workflowID).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var state collaboration.State
+		if err := json.Unmarshal(raw, &state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	state := readState()
+	if len(state.Rounds) != 0 || len(state.References) != 0 || state.Waiting || api.posts != 0 {
+		t.Fatalf("failed preflight claimed domain state: rounds=%d references=%d waiting=%t posts=%d", len(state.Rounds), len(state.References), state.Waiting, api.posts)
+	}
+	// Authoritative question validation must still win over render limits.
+	duplicate := append([]collaboration.Question(nil), questions...)
+	duplicate[8].ID = duplicate[0].ID
+	result := callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, map[string]any{"operation_id": "duplicate-before-render", "questions": duplicate}, false)
+	if !strings.Contains(result, "duplicate_question") {
+		t.Fatal(result)
+	}
+	for i := range questions {
+		questions[i].Body = "Short question?"
+	}
+	result = callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, map[string]any{"operation_id": "shortened-fresh-operation", "questions": questions}, false)
+	state = readState()
+	if !strings.Contains(result, "CLARIFICATION_WAIT") || api.posts != 1 || len(state.Rounds) != 1 || len(state.References) != 1 || state.Rounds[0].Reference != "R1" || state.Rounds[0].Artifact == nil || !reflect.DeepEqual(state.Rounds[0].Questions, questions) {
+		t.Fatal(result, api.posts, state)
+	}
+	// A later uncertain POST must still retain its frozen artifact and fence
+	// even oversized new requests; preflight rollback is not effect recovery.
+	api.postError = context.DeadlineExceeded
+	uncertain := append(append([]collaboration.Question(nil), questions...), collaboration.Question{ID: "Q10", Body: "Another question?"})
+	callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, map[string]any{"operation_id": "uncertain-publication", "questions": uncertain}, true)
+	before := readState()
+	if api.posts != 2 || len(before.Rounds) != 2 || before.Rounds[1].Artifact == nil || before.Rounds[1].Published {
+		t.Fatal(api.posts, before)
+	}
+	for i := range questions {
+		questions[i].Body = strings.Repeat("x", 8000)
+	}
+	blocked := callReplayGatewayTool(t, gateway, registration, mcp.ToolRequestClarification, map[string]any{"operation_id": "cannot-bypass-uncertain", "questions": questions}, false)
+	if !strings.Contains(blocked, "earlier_publication_unsettled") || api.posts != 2 || !reflect.DeepEqual(readState().Rounds, before.Rounds) {
+		t.Fatal(blocked, api.posts)
+	}
+	if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+		t.Fatal(err)
 	}
 }

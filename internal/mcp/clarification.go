@@ -11,7 +11,7 @@ import (
 
 type ClarificationStore interface {
 	HasPendingHumanInput(context.Context, string, string) (bool, error)
-	RequestClarification(context.Context, store.AgentTurnLease, string, []collaboration.Question) (collaboration.Round, error)
+	RequestClarification(context.Context, store.AgentTurnLease, string, []collaboration.Question, func(collaboration.Round) error) (collaboration.Round, error)
 	ConfirmClarificationPublication(context.Context, string, string, collaboration.Source) error
 	GetClarificationRound(context.Context, string, string) (collaboration.Round, error)
 	ResolveClarification(context.Context, store.AgentTurnLease, string, string, []collaboration.Resolution) error
@@ -36,9 +36,11 @@ func (backend *ProductionBackend) requestClarification(ctx context.Context, invo
 		}
 		return nil
 	}}
-	// Validate under the authoritative store fence before renderer preflight;
-	// count mistakes must not be masked by an oversized provisional payload.
-	reserved, err := backend.clarifications.RequestClarification(ctx, invocation.lease, invocation.OperationID, request.Questions)
+	// Authoritative question validation precedes side-effect-free rendering,
+	// but failed preflight must not commit question identities or references.
+	reserved, err := backend.clarifications.RequestClarification(ctx, invocation.lease, invocation.OperationID, request.Questions, func(round collaboration.Round) error {
+		return publisher.Validate(collaboration.PublicationMessage{WorkflowID: invocation.Scope.WorkflowID, Round: round, Signature: request.Signature})
+	})
 	if err != nil {
 		if IsOutcomeUnknown(err) {
 			return nil, err

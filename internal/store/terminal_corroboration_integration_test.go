@@ -1644,7 +1644,7 @@ func TestRetryTurnExposesOnlyItsSuccessfulAncestorTerminalIntent(t *testing.T) {
 	fixture, original, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 978, workflow.RoleDeveloper, "")
 	qs := []collaboration.Question{{ID: "duplicate", Body: "First?"}, {ID: "duplicate", Body: "Second?"}}
 	rejected := startQuestionRequest(t, database, ctx, original, "rejected-question", qs)
-	_, rejectionErr := database.RequestClarification(ctx, original, rejected.ID, qs)
+	_, rejectionErr := database.RequestClarification(ctx, original, rejected.ID, qs, nil)
 	var validation *collaboration.RequestValidationError
 	if !errors.As(rejectionErr, &validation) {
 		t.Fatal(rejectionErr)

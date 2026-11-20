@@ -46,7 +46,7 @@ func TestClarificationRecordedPromptRecovery(t *testing.T) {
 					}
 					badQuestions := []collaboration.Question{{ID: "duplicate", Body: "One?"}, {ID: "duplicate", Body: "Two?"}}
 					bad := startQuestionRequest(t, database, ctx, lease, "rejected-first", badQuestions)
-					_, err := database.RequestClarification(ctx, lease, bad.ID, badQuestions)
+					_, err := database.RequestClarification(ctx, lease, bad.ID, badQuestions, nil)
 					var validation *collaboration.RequestValidationError
 					if !errors.As(err, &validation) {
 						t.Fatal(err)
@@ -71,7 +71,7 @@ func TestClarificationRecordedPromptRecovery(t *testing.T) {
 					if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
 						t.Fatal(err)
 					}
-					round, err := database.RequestClarification(ctx, lease, mutation.ID, questions)
+					round, err := database.RequestClarification(ctx, lease, mutation.ID, questions, nil)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -177,7 +177,7 @@ func TestClarificationRevalidationAfterExplicitHumanHandoffRecovery(t *testing.T
 			if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
 				t.Fatal(err)
 			}
-			round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}})
+			round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

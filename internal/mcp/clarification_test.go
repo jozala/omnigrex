@@ -30,11 +30,17 @@ type clarificationLedger struct {
 	source              collaboration.Source
 }
 
-func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question) (collaboration.Round, error) {
+func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question, preflight func(collaboration.Round) error) (collaboration.Round, error) {
 	if f.limit > 0 && len(questions) > f.limit {
 		return collaboration.Round{}, &collaboration.RequestValidationError{Code: "question_limit_exceeded"}
 	}
-	f.round = collaboration.Round{Reference: "R1", ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, ID: "R" + id, Questions: questions}
+	round := collaboration.Round{Reference: "R1", ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, ID: "R" + id, Questions: questions}
+	if preflight != nil {
+		if err := preflight(round); err != nil {
+			return collaboration.Round{}, err
+		}
+	}
+	f.round = round
 	return f.round, nil
 }
 func (f *clarificationLedger) ConfirmClarificationPublication(_ context.Context, _, id string, source collaboration.Source) error {
@@ -426,7 +432,7 @@ type rejectingRequestLedger struct {
 	err error
 }
 
-func (f *rejectingRequestLedger) RequestClarification(context.Context, store.AgentTurnLease, string, []collaboration.Question) (collaboration.Round, error) {
+func (f *rejectingRequestLedger) RequestClarification(context.Context, store.AgentTurnLease, string, []collaboration.Question, func(collaboration.Round) error) (collaboration.Round, error) {
 	return collaboration.Round{}, f.err
 }
 
