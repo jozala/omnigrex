@@ -100,6 +100,12 @@ func testPiPlanningWorkflow(t *testing.T) {
 	if err = json.Unmarshal(raw, &state); err != nil {
 		t.Fatal(err)
 	}
+	if len(state.RequestAdmissionRejections) != 1 || state.RequestAdmissionRejections[0].Validation.Code != "question_limit_exceeded" {
+		t.Fatal("missing admission-only rejection", state.RequestAdmissionRejections)
+	}
+	if len(state.RequestRejections) != 1 || state.RequestRejections[0].Validation.Code != "question_identity_content_changed" {
+		t.Fatal("missing durable request rejection", state.RequestRejections)
+	}
 	if len(state.ResolutionRejections) != 1 || state.ResolutionRejections[0].Validation.Code != "response_not_valid_for_question" {
 		t.Fatal("missing durable resolution rejection", state.ResolutionRejections)
 	}

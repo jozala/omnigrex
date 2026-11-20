@@ -504,11 +504,22 @@ func TestExplicitDeclarationsRequired(t *testing.T) {
 	}
 }
 
-func TestReusedBundleQualificationRequiresOriginalProvenance(t *testing.T) {
+// Legacy provenance tests must not switch qualification protocols when the
+// repository selects a newer bundle record.
+func legacyBundleFixture(t *testing.T) piresources.Bundle {
+	t.Helper()
 	bundle, err := piresources.SelectedBundle("linux", "amd64")
 	if err != nil {
 		t.Fatal(err)
 	}
+	bundle.Version = 1
+	bundle.Qualification.Commit = ""
+	bundle.Qualification.Suite = ""
+	return bundle
+}
+
+func TestReusedBundleQualificationRequiresOriginalProvenance(t *testing.T) {
+	bundle := legacyBundleFixture(t)
 	b := fixtureBuild()
 	b.SchemaVersion = 2
 	b.PiBundle = &bundle
@@ -553,10 +564,7 @@ func TestReusedBundleQualificationRequiresOriginalProvenance(t *testing.T) {
 
 func TestSelectedBundlePromotionPreservesBytesWithoutOriginalCI(t *testing.T) {
 	f := newGitHubFixture(t)
-	bundle, err := piresources.SelectedBundle("linux", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
+	bundle := legacyBundleFixture(t)
 	b := f.build
 	b.SchemaVersion = 2
 	b.PiBundle = &bundle
@@ -648,10 +656,7 @@ func legacyBundleAPI(t *testing.T, bundle piresources.Bundle, jobs []Job) github
 }
 
 func TestLaterQualificationBindsExactCandidateNotBuildCommitOrSelection(t *testing.T) {
-	selected, err := piresources.SelectedBundle("linux", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
+	selected := legacyBundleFixture(t)
 	adopted := selected
 	adopted.Version = 2
 	adopted.SourceCommit = strings.Repeat("c", 40) // Built at C; the selection then remained R1.
@@ -670,7 +675,19 @@ func TestLaterQualificationBindsExactCandidateNotBuildCommitOrSelection(t *testi
 			case "R1-digest":
 				candidate.Image = selected.Image
 			case "wrong-inventory":
-				candidate.Resources = selected.Resources
+				// Selection and candidate inventories may legitimately be equal.
+				// Change one valid hash so this remains a genuine mismatch.
+				var inventory piresources.ResourceContract
+				if err := json.Unmarshal(candidate.Resources, &inventory); err != nil {
+					t.Fatal(err)
+				}
+				hash := inventory.Files[0].SHA256
+				prefix := "0"
+				if hash[0] == '0' {
+					prefix = "1"
+				}
+				inventory.Files[0].SHA256 = prefix + hash[1:]
+				candidate.Resources = mustJSON(t, inventory)
 			case "wrong-source":
 				candidate.SourceCommit = selected.SourceCommit
 			}

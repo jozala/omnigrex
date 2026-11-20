@@ -246,3 +246,17 @@ Do not edit ledger state, manufacture another event, or manually retry an uncert
 Missing status comments or a label failure do not grant, revoke, reopen or repeat implementation.
 Use the existing Human Handoff recovery procedure for actual Workflow failures; recovering a completed plan's projection does not itself reopen discussion or allocate development.
 A separately requested human revision uses explicit steering/amendment and exact-pair authorization as described in the [planning guide](../users/planning.md).
+
+## Clarification request rejected without publication
+
+A successful MCP transport with `status: rejected` and `publication: not_applied` means that request did not publish a new question round and is not terminal waiting intent.
+The durable operation-specific receipt contains a canonical reason and bounded structural position, not human source bodies.
+For `correct_arguments_new_operation`, the agent should repair its arguments using the existing conversation, preserving exact question bodies or using explicit replacement identities.
+Do not request another sufficient human answer, approve a technical retry, or repair the database for this condition.
+Identical-operation replay returns the same rejection, not a corrected publication attempt.
+
+`earlier_publication_unsettled` with `reconcile_prior_operation` is different: only the new request is proven not applied; the earlier operation still needs exact-operation/artifact reconciliation.
+An absent comment or omitted history does not settle it, and a fresh request cannot bypass the fence.
+Use the existing [Human Handoff recovery procedure](../users/human-handoffs.md) when normal recovery cannot establish the earlier outcome.
+Unexpected tool errors and ambiguous commits are not rejection receipts and retain conservative recovery behavior.
+These contracts do not authorize production state edits or automatic reactivation of historical Work Items.

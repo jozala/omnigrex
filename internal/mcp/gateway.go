@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/agent"
@@ -768,7 +769,7 @@ func (gateway *Gateway) callTool(response http.ResponseWriter, request *http.Req
 		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
 		return
 	}
-	if validateArguments(params.Arguments, tool.InputSchema) != nil {
+	if validateToolArguments(params.Arguments, tool) != nil {
 		gateway.logRequestRejected(request, tool.Name, "argument_validation", "invalid_arguments")
 		writeRPCError(response, rpc.ID, -32602, "invalid tool arguments")
 		return
@@ -972,7 +973,16 @@ func (gateway *Gateway) callMutation(response http.ResponseWriter, request *http
 	if err != nil {
 		observeToolError(operationContext, err)
 		var rejection *store.MutationReservationRejection
-		finishCall(errors.As(err, &rejection))
+		provenNotAdmitted := errors.As(err, &rejection) && !IsOutcomeUnknown(err)
+		finishCall(provenNotAdmitted)
+		var validation *collaboration.RequestValidationError
+		if provenNotAdmitted && invocation.Name == ToolRequestClarification && errors.As(rejection.Cause, &validation) && validation.Code == "question_limit_exceeded" {
+			result, resultErr := collaboration.RequestRejectionResult(validation)
+			if resultErr == nil {
+				writeToolResult(response, id, result)
+				return
+			}
+		}
 		switch {
 		case errors.Is(err, store.ErrMutationOperationConflict):
 			writeToolError(response, id, "mutation operation identity conflict")

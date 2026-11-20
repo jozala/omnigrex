@@ -127,17 +127,19 @@ type Preparation struct {
 }
 
 type State struct {
-	ResolutionRejections   []ResolutionRejection `json:"resolution_rejections,omitempty"`
-	InterpretationSequence uint64                `json:"interpretation_sequence,omitempty"`
-	Assessments            []Assessment          `json:"assessments,omitempty"`
-	References             []Reference           `json:"references,omitempty"`
-	Planning               *PlanningState        `json:"planning,omitempty"`
-	Preparations           []Preparation         `json:"preparations,omitempty"`
-	Rounds                 []Round               `json:"rounds"`
-	Inputs                 []Input               `json:"inputs"`
-	Receipts               []Receipt             `json:"receipts"`
-	CurrentRound           string                `json:"current_round,omitempty"`
-	Waiting                bool                  `json:"waiting"`
+	RequestAdmissionRejections []RequestAdmissionRejection `json:"request_admission_rejections,omitempty"`
+	RequestRejections          []RequestRejection          `json:"request_rejections,omitempty"`
+	ResolutionRejections       []ResolutionRejection       `json:"resolution_rejections,omitempty"`
+	InterpretationSequence     uint64                      `json:"interpretation_sequence,omitempty"`
+	Assessments                []Assessment                `json:"assessments,omitempty"`
+	References                 []Reference                 `json:"references,omitempty"`
+	Planning                   *PlanningState              `json:"planning,omitempty"`
+	Preparations               []Preparation               `json:"preparations,omitempty"`
+	Rounds                     []Round                     `json:"rounds"`
+	Inputs                     []Input                     `json:"inputs"`
+	Receipts                   []Receipt                   `json:"receipts"`
+	CurrentRound               string                      `json:"current_round,omitempty"`
+	Waiting                    bool                        `json:"waiting"`
 }
 type Command struct {
 	Kind   string
@@ -164,20 +166,29 @@ var ErrInvalid = errors.New("invalid collaboration operation")
 // Request reserves an immutable question round before publication. An unconfirmed
 // publication is never represented as delivered. The caller supplies domain IDs.
 func (s *State) Request(id, participant, turn, head string, questions []Question) (Round, error) {
-	if id == "" || participant == "" || turn == "" || len(questions) == 0 {
+	if id == "" || participant == "" || turn == "" {
 		return Round{}, ErrInvalid
 	}
 	for _, r := range s.Rounds {
 		if !r.Published && !r.PublicationFailed {
-			return Round{}, ErrInvalid
+			return Round{}, &RequestValidationError{Code: "earlier_publication_unsettled"}
 		}
 		if r.ID == id {
 			return Round{}, ErrInvalid
 		}
 	}
+	if len(questions) == 0 {
+		return Round{}, &RequestValidationError{Code: "empty_questions_without_wait"}
+	}
+	if len(questions) > 50 {
+		return Round{}, &RequestValidationError{Code: "question_limit_exceeded"}
+	}
 	seen := map[string]bool{}
-	for _, q := range questions {
-		if q.ID == "" || strings.TrimSpace(q.Body) == "" || seen[q.ID] {
+	for i, q := range questions {
+		if seen[q.ID] {
+			return Round{}, &RequestValidationError{Code: "duplicate_question", QuestionIndex: i + 1}
+		}
+		if q.ID == "" || strings.TrimSpace(q.Body) == "" {
 			return Round{}, ErrInvalid
 		}
 		seen[q.ID] = true
@@ -185,7 +196,7 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 		for _, r := range s.Rounds {
 			for _, old := range r.Questions {
 				if old.ID == q.ID && old.Body != q.Body {
-					return Round{}, ErrInvalid
+					return Round{}, &RequestValidationError{Code: "question_identity_content_changed", QuestionIndex: i + 1}
 				}
 			}
 		}
@@ -197,7 +208,7 @@ func (s *State) Request(id, participant, turn, head string, questions []Question
 				resolved := resolution != nil && s.resolutionCurrent(*resolution)
 				carried := slices.ContainsFunc(questions, func(q Question) bool { return q.ID == old.ID || q.Replaces == old.ID })
 				if !resolved && !carried {
-					return Round{}, ErrInvalid
+					return Round{}, &RequestValidationError{Code: "unresolved_question_dropped"}
 				}
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/gitremote"
 	"github.com/jozala/omnigrex/internal/mcp"
@@ -1075,6 +1076,9 @@ func successfulTerminalIntents(mutations []store.MutationReservation) []store.Mu
 	intents := make([]store.MutationReservation, 0, 1)
 	for _, mutation := range mutations {
 		if mutation.State != store.MutationSucceeded {
+			continue
+		}
+		if mutation.ToolName == mcp.ToolRequestClarification && collaboration.IsRequestRejection(mutation.Result) {
 			continue
 		}
 		switch mutation.ToolName {
