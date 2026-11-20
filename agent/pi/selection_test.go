@@ -60,8 +60,12 @@ func TestQualificationUsesOnlyBoundInventory(t *testing.T) {
 	if err := json.Unmarshal(bundle.Resources, &inventory); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(script, inventory.NodeVersion) || !strings.Contains(script, inventory.MiseSHA256) {
-		t.Fatal("qualification replaced bound tool versions")
+	if !strings.Contains(script, inventory.NodeVersion) {
+		t.Fatal("qualification replaced bound Node version")
+	}
+	miseCheck := "printf '%s  %s\\n' '" + inventory.MiseSHA256 + "' /usr/local/bin/mise | sha256sum -c -"
+	if !strings.Contains(script, miseCheck) {
+		t.Fatal("qualification omitted bound mise checksum")
 	}
 	for _, file := range inventory.Files {
 		want := "printf '%s  %s\\n' '" + file.SHA256 + "' '/opt/omnigrex/pi/" + file.Name + "' | sha256sum -c -"
