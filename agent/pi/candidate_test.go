@@ -6,10 +6,7 @@ import (
 )
 
 func TestCandidateAndQualifiedIdentitiesAreSeparate(t *testing.T) {
-	selected, err := SelectedBundle("linux", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
+	selected := fixtureBundle(t)
 	proposed := selected.Candidate()
 	proposed.Resources = CandidateContract("amd64")
 	data, _ := json.Marshal(proposed)
