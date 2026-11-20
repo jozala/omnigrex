@@ -76,10 +76,11 @@ func (client *APIClient) VerifyCITarget(ctx context.Context, token, owner, repos
 	if err != nil {
 		return fail(err)
 	}
-	if branch.Name != baseRef || branch.Commit.SHA != pr.Base.SHA {
+	if branch.Name != baseRef || !validCommitSHA(branch.Commit.SHA) {
 		mapping.State = "stale"
 		return mapping
 	}
+	mapping.BaseSHA = branch.Commit.SHA
 	var commit struct {
 		SHA     string `json:"sha"`
 		Parents []struct {
@@ -90,7 +91,7 @@ func (client *APIClient) VerifyCITarget(ctx context.Context, token, owner, repos
 	if err != nil {
 		return fail(err)
 	}
-	if commit.SHA != *pr.MergeCommitSHA || len(commit.Parents) != 2 || commit.Parents[0].SHA != pr.Base.SHA || commit.Parents[1].SHA != head {
+	if commit.SHA != *pr.MergeCommitSHA || len(commit.Parents) != 2 || commit.Parents[0].SHA != branch.Commit.SHA || commit.Parents[1].SHA != head {
 		mapping.State = "conflicting"
 		return mapping
 	}
@@ -101,7 +102,22 @@ func (client *APIClient) VerifyCITarget(ctx context.Context, token, owner, repos
 	if err != nil {
 		return fail(err)
 	}
-	if fresh.ID != pr.ID || fresh.Head.SHA != head || fresh.Base.SHA != pr.Base.SHA || fresh.Base.Ref != baseRef || fresh.Base.Repository == nil || fresh.Base.Repository.ID != repoID || fresh.MergeCommitSHA == nil || *fresh.MergeCommitSHA != *pr.MergeCommitSHA || fresh.Mergeable == nil || !*fresh.Mergeable || fresh.Merged || fresh.State != "open" {
+	if fresh.ID != pr.ID || fresh.Head.SHA != head || fresh.Head.Ref != headRef || fresh.Base.SHA != pr.Base.SHA || fresh.Base.Ref != baseRef || fresh.Base.Repository == nil || fresh.Base.Repository.ID != repoID || fresh.Base.Repository.FullName != owner+"/"+repository || fresh.MergeCommitSHA == nil || *fresh.MergeCommitSHA != *pr.MergeCommitSHA || fresh.Mergeable == nil || !*fresh.Mergeable || fresh.Merged || fresh.State != "open" {
+		mapping.State = "stale"
+		return mapping
+	}
+	// PR base.sha can lag the live target tip. Reobserve the independent branch
+	// too: an advance while reading the merge object invalidates its provenance.
+	var freshBranch struct {
+		Name   string `json:"name"`
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if err := client.doJSON(ctx, http.MethodGet, root+"/branches/"+url.PathEscape(baseRef), token, nil, &freshBranch); err != nil {
+		return fail(err)
+	}
+	if freshBranch.Name != baseRef || freshBranch.Commit.SHA != branch.Commit.SHA {
 		mapping.State = "stale"
 		return mapping
 	}
