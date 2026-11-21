@@ -124,6 +124,14 @@ func TestClarificationRecordedPromptRecovery(t *testing.T) {
 					if err = pool.QueryRow(ctx, `SELECT w.clarification_waiting,a.infrastructure_failures,COALESCE((a.review_usage->>'review')::int,0),s.workflow_outcome,t.status,t.workflow_attempt_id::text,s.agent_participant_id::text,t.agent_session_id::text,(SELECT count(*) FROM agent_turns WHERE workflow_id=w.id AND active),(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND kind='PREPARE_AGENT_TURN' AND status IN ('AVAILABLE','LEASED')) FROM workflows w JOIN workflow_attempts a ON a.id=$2 JOIN agent_turns t ON t.id=$3 JOIN agent_turn_settlements s ON s.agent_turn_id=t.id WHERE w.id=$1`, fixture.workflowID, fixture.attemptID, lease.ID).Scan(&waiting, &retries, &reviewUsage, &outcome, &status, &attempt, &participant, &session, &active, &jobs); err != nil {
 						t.Fatal(err)
 					}
+					var overlay bool
+					var overlayRevision, labelJobs int
+					if err = pool.QueryRow(ctx, `SELECT human_input_waiting,human_input_presentation_revision,(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND idempotency_key LIKE 'human-input-presentation:%') FROM workflows w WHERE id=$1`, fixture.workflowID).Scan(&overlay, &overlayRevision, &labelJobs); err != nil {
+						t.Fatal(err)
+					}
+					if overlay != (inputTiming == "none") || (overlay && (overlayRevision != 1 || labelJobs != 1)) {
+						t.Fatalf("incorrect durable overlay: %t revision=%d jobs=%d timing=%s", overlay, overlayRevision, labelJobs, inputTiming)
+					}
 					if inputTiming == "unpublished" {
 						if waiting || retries != 1 || jobs != 0 || outcome != "INFRASTRUCTURE_FAILED" || status != "FAILED" {
 							t.Fatalf("unpublished question was treated as delivered: wait=%t retries=%d jobs=%d outcome=%s status=%s", waiting, retries, jobs, outcome, status)

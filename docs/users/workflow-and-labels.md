@@ -13,6 +13,7 @@
 | `omnigrex:developing` | Developer work is active or pending |
 | `omnigrex:reviewing` | Reviewer work is active or pending |
 | `omnigrex:pr-ready` | The current Change Proposal head is approved and ready for human review |
+| `omnigrex:waiting-for-input` | Work Item Issue is awaiting a human clarification response or exact-plan confirmation |
 | `omnigrex:needs-human` | Autonomous progress stopped in a Human Handoff |
 
 The state labels are observations maintained by Omnigrex, not commands to force a transition.
@@ -92,3 +93,19 @@ This does not change GitHub branch protection, review approval requirements, or 
 The waiting label is removed when review is admitted or the wait is cancelled; review queued is distinct from actual Turn allocation.
 New heads replace one pending target without extending its deadline.
 CI completion never resumes a closed Workflow or existing Human Handoff without explicit human reactivation.
+
+## Waiting for human input
+
+`omnigrex:waiting-for-input` appears alongside the Stage label on the Work Item Issue only, not its Change Proposal.
+It covers [clarification](clarification.md) from Planner, Developer or Reviewer and [exact-plan confirmation](planning.md), including a proposed pair with no open questions.
+The latest published question round or proposed pair explains which response is needed; no separate progress comment is added.
+This is an observation, not an activation command, implementation consent or Human Handoff.
+
+An admitted response, including a partial answer, clears the indication when continuation queues, before the next Agent Turn starts.
+A subsequent genuine request for input restores it.
+Rejected commands, unrelated comments, edits, deletions and replayed earlier responses do not clear a newer wait.
+Active execution, pending preparation or terminal-input revalidation, completed planning, PR-ready, Human Handoff and closed/closing or dormant Work Items are not human-input waits.
+
+Updates reconcile durably and eventually after GitHub calls, retries and restarts; a label is not an atomic execution-state guarantee.
+Upgrading an existing installation schedules label-only reconciliation for persisted collaboration records without asking humans to repeat answers or starting new Agent Turns.
+This differs from the [CI wait](#waiting-for-ci-before-review), which requires no human response, and from [Human Handoff](human-handoffs.md), which stops autonomous progress for recovery.
