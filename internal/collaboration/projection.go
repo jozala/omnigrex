@@ -40,6 +40,10 @@ func (s *State) Records(participant, turn, collection string) []json.RawMessage 
 			raw, _ := json.Marshal(in)
 			records = append(records, raw)
 		}
+	case "replanning":
+		if raw := s.ReplanningRecord(participant); len(raw) > 0 {
+			records = append(records, raw)
+		}
 	case "accepted_plan":
 		if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
 			for _, r := range s.Planning.Revisions {
@@ -83,7 +87,7 @@ func (s *State) Project(participant, turn string) map[string]json.RawMessage {
 	if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
 		projection.Instruction = "Read the exact accepted_plan and original request before dependent work. Supporting discussion histories are omitted for focus but remain available through their frozen counts and bounded retrieval as needed; omission is not absence. If accepted_plan is omitted, retrieve every chunk before dependent work and terminal handoff."
 	}
-	for _, name := range []string{"human_input", "human_input_history", "clarification_history", "planning_request", "planning_history", "assessment_history", "accepted_plan"} {
+	for _, name := range []string{"human_input", "human_input_history", "clarification_history", "planning_request", "planning_history", "assessment_history", "accepted_plan", "replanning"} {
 		records := s.Records(participant, turn, name)
 		projection.Counts[name] = len(records)
 		if records == nil {
@@ -110,6 +114,17 @@ func (s *State) Project(participant, turn string) map[string]json.RawMessage {
 			}
 		}
 		projection.Instruction = "Before interpreting input or handing off, retrieve every human_input record with get_collaboration_record, starting index 0 and following next_offset/next_index. All pending input is frozen for this Turn; there is no collection delay. Retrieve older human_input_history and clarification_history as needed. Concatenate content chunks verbatim with one record_sha256 per record, then parse the JSON; receipt is not interpretation. Handoff remains fenced until every required chunk has a successful scoped read record."
+	}
+	if s.Replanning != nil {
+		for i := range s.Replanning.Cycles {
+			c := &s.Replanning.Cycles[i]
+			if c.Phase != ReplanningRequested && c.Phase != ReplanningCompleted && c.Scope.PlannerParticipantID == participant && !c.EvidenceDelivered {
+				c.EvidenceTurnID = turn
+				if !projection.RetrievalRequired {
+					c.EvidenceDelivered = true
+				}
+			}
+		}
 	}
 	object["collaboration_projection"], _ = json.Marshal(projection)
 	return object

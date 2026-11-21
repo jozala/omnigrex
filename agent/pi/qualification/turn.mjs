@@ -1,6 +1,7 @@
 // Qualification only: replace the HTTP model catalog, retaining production
 // bootstrap, durable preparation, resources, RPC, permissions and MCP bridge.
 import http from 'node:http';
+import { replanningCall } from './replanning.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { stat, writeFile } from 'node:fs/promises';
 import { readBootstrap, run } from '../runner.mjs';
@@ -27,7 +28,7 @@ try {
       if (process.env[name] !== path || !(await stat(path)).isDirectory()) throw new Error('admitted disk-backed path was not preserved');
     }
     const role = envelope.triggering_event.role;
-    if(envelope.implementation_handoff){
+    if(envelope.implementation_handoff && !fault.startsWith('replanning')){
       const accepted=envelope.accepted_plan?.[0];
       if(!accepted?.published || accepted.id!==envelope.implementation_handoff.revision_id || !accepted.content?.requirements_brief || !accepted.content?.technical_plan || !accepted.original_request?.body || !accepted.decisions?.length)throw new Error('missing exact accepted pair or original source handoff');
     }
@@ -59,10 +60,12 @@ try {
       if (step > 1) return;
       if (step === 1) await notify('continue');
       name = 'omnigrex_get_issue'; args = {};
+    } else if (fault.startsWith('replanning')) {
+      ({name,args} = replanningCall(envelope, results, fault === 'replanning-unchanged') ?? {});
     } else if (fault === 'planning' && role === 'PLANNER') {
       if(role!=='PLANNER'||names.some(n=>['omnigrex_publish_changes','omnigrex_open_pr','omnigrex_submit_review','omnigrex_request_review'].includes(n)))throw new Error('planning authority escaped');
       const system=data.messages.filter(m=>m.role==='system').map(m=>text(m.content)).join('\n');
-      if(!system.includes('omnigrex-discovery/v2'))throw new Error('discovery missing on continuation');
+      if(!system.includes('omnigrex-discovery/v3'))throw new Error('discovery missing on continuation');
       const rounds=(envelope.clarification_history??[]).filter(r=>r.participant_id===envelope.agent_participant_id);
       const input=envelope.human_input??[];
       const decisions=[...(envelope.human_input_history??[]),...input].filter(i=>!['confirm-plan','implement'].includes(i.kind));

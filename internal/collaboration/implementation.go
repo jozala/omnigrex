@@ -17,19 +17,26 @@ type ImplementationAction struct {
 	Source         Source    `json:"source"`
 }
 
+type ImplementationBinding struct {
+	CycleID         string `json:"cycle_id,omitempty"`
+	TurnID          string `json:"turn_id"`
+	RevisionID      string `json:"revision_id"`
+	AuthorizationID string `json:"authorization_id"`
+}
 type ImplementationState struct {
-	Actions              []ImplementationAction `json:"actions"`
-	Invalidated          []string               `json:"invalidated,omitempty"`
-	FirstDeveloperTurnID string                 `json:"first_developer_turn_id,omitempty"`
-	AcceptedRevisionID   string                 `json:"accepted_revision_id,omitempty"`
-	AuthorizationID      string                 `json:"authorization_id,omitempty"`
+	Bindings             []ImplementationBinding `json:"bindings,omitempty"`
+	Actions              []ImplementationAction  `json:"actions"`
+	Invalidated          []string                `json:"invalidated,omitempty"`
+	FirstDeveloperTurnID string                  `json:"first_developer_turn_id,omitempty"`
+	AcceptedRevisionID   string                  `json:"accepted_revision_id,omitempty"`
+	AuthorizationID      string                  `json:"authorization_id,omitempty"`
 }
 
 func exactConfirmation(kind string) bool { return kind == "confirm-plan" || kind == "implement" }
 
 // ImplementationGrant is unused, current human authority, not an admission.
 func (s *State) ImplementationGrant() *ImplementationAction {
-	if s.Planning == nil || s.Planning.Implementation.FirstDeveloperTurnID != "" {
+	if s.Planning == nil || s.Planning.Implementation.FirstDeveloperTurnID != "" && s.ActiveReplanning() == nil {
 		return nil
 	}
 	p := s.Planning
@@ -79,7 +86,7 @@ func (s *State) ImplementationCommit() string {
 
 func (s *State) implementationTarget(target, participant string) string {
 	r := s.CurrentCheckpoint()
-	if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" {
+	if s.Planning != nil && s.Planning.Implementation.FirstDeveloperTurnID != "" && s.ActiveReplanning() == nil {
 		return "Implementation has already started. Withdrawal cannot stop it; close the original Work Item Issue to use the existing stopping mechanism."
 	}
 	if r == nil || !r.Published || r.Source == nil || r.Content.Status != "proposed" || r.ID != target || r.ParticipantID != participant {

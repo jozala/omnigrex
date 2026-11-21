@@ -96,11 +96,11 @@ func (store *Store) GetChangeProposalReview(ctx context.Context, repositoryID, r
 	var review workflow.ReviewIdentity
 	err := store.pool.QueryRow(ctx, `
 SELECT review.review_id, review.review_node_id, proposal.pull_request_id,
-       review.actor_id, review.head_sha
+       review.actor_id, review.head_sha, COALESCE(review.accepted_plan_revision_id,'')
 FROM change_proposal_reviews AS review
 JOIN change_proposals AS proposal ON proposal.id = review.change_proposal_id
 WHERE review.repository_id = $1 AND review.review_id = $2`, repositoryID, reviewID).Scan(
-		&review.ID, &review.NodeID, &review.ChangeProposalID, &review.ActorID, &review.HeadSHA,
+		&review.ID, &review.NodeID, &review.ChangeProposalID, &review.ActorID, &review.HeadSHA, &review.AcceptedPlanRevisionID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -745,10 +745,10 @@ FROM workflows WHERE id = $1 FOR UPDATE`, workflowID).Scan(
 	var reviewUsageJSON []byte
 	err = tx.QueryRow(ctx, `
 	SELECT id::text, attempt_number, started_at, infrastructure_failures,
-	       infrastructure_failure_limit, current_stage, review_usage, ci_repair_usage
+	       infrastructure_failure_limit, current_stage, review_usage, autonomous_replanning_returns, ci_repair_usage
 FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
 		&attempt.ID, &attempt.Number, &attempt.StartedAt, &attempt.InfrastructureRetryBudget.Used,
-		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON, &attempt.CIRepairUsage)
+		&attempt.InfrastructureRetryBudget.Limit, &attempt.CurrentStage, &reviewUsageJSON, &attempt.AutonomousReplanningReturns, &attempt.CIRepairUsage)
 	if err == nil {
 		if err := json.Unmarshal(reviewUsageJSON, &attempt.ReviewUsage); err != nil {
 			return workflow.Snapshot{}, fmt.Errorf("rehydrate attempt Stage usage: %w", err)
@@ -761,11 +761,21 @@ FROM workflow_attempts WHERE workflow_id = $1 AND active`, workflowID).Scan(
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return workflow.Snapshot{}, fmt.Errorf("rehydrate active attempt: %w", err)
 	}
+	state, err := readCollaborationTx(ctx, tx, workflowID)
+	if err != nil {
+		return workflow.Snapshot{}, err
+	}
+	if state.Planning != nil {
+		snapshot.AcceptedPlanRevisionID = state.Planning.Implementation.AcceptedRevisionID
+	}
+	if cycle := state.ActiveReplanning(); cycle != nil && (cycle.Phase != collaboration.ReplanningRequested || snapshot.State == workflow.StateNeedsHuman) {
+		snapshot.ReplanningCycleID = cycle.Scope.OperationID
+	}
 	var proposal workflow.ChangeProposal
 	err = tx.QueryRow(ctx, `
-SELECT pull_request_id, pull_request_number, head_sha, active, COALESCE(ready_for_sha, '')
+SELECT pull_request_id, pull_request_number, head_sha, active, COALESCE(ready_for_sha, ''),COALESCE(ready_for_plan_revision_id,'')
 FROM change_proposals WHERE workflow_id = $1 AND active`, workflowID).Scan(
-		&proposal.ID, &proposal.Number, &proposal.HeadSHA, &proposal.Open, &proposal.ReadyForSHA)
+		&proposal.ID, &proposal.Number, &proposal.HeadSHA, &proposal.Open, &proposal.ReadyForSHA, &proposal.ReadyForPlanRevisionID)
 	if err == nil {
 		snapshot.ChangeProposal = &proposal
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -841,6 +851,55 @@ func persistAppliedDecisionWithProvenance(ctx context.Context, tx pgx.Tx, delive
 }
 
 func persistAppliedDecisionWithInternalProvenance(ctx context.Context, tx pgx.Tx, deliveryID, settlementID, internalEventID, workflowID string, current workflow.Snapshot, decision workflow.Decision, actionNamespace string) error {
+	recoveredPending := false
+	if current.State == workflow.StateNeedsHuman && decision.Snapshot.State == workflow.StatePlanning && decision.Snapshot.CurrentAttempt != nil {
+		state, err := readCollaborationTx(ctx, tx, workflowID)
+		if err != nil {
+			return err
+		}
+		if c := state.ActiveReplanning(); c != nil && c.Phase == collaboration.ReplanningQueued {
+			if err = state.ReconsiderReplanning(); err != nil {
+				return err
+			}
+			if err = saveCollaborationTx(ctx, tx, workflowID, state); err != nil {
+				return err
+			}
+		}
+		if c := state.ActiveReplanning(); c != nil && c.Phase == collaboration.ReplanningRequested && decision.Snapshot.CurrentAttempt.ID != c.Scope.AttemptID {
+			var settled bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_turns t JOIN tool_invocations i ON i.agent_turn_id=t.id WHERE t.id=$1 AND i.id=$2 AND i.state='SUCCEEDED' AND t.completed_at IS NOT NULL AND NOT t.mutation_admission_open AND NOT EXISTS(SELECT 1 FROM tool_invocations pending WHERE pending.agent_turn_id=t.id AND pending.kind='MUTATION' AND pending.state IN ('RESERVED','IN_FLIGHT','UNKNOWN','RECONCILING')))`, c.Scope.TurnID, c.Scope.OperationID).Scan(&settled); err != nil {
+				return err
+			}
+			if !settled {
+				return ErrAgentTurnMutationsUnsettled
+			}
+			recoveredPending = true
+			decision.Snapshot.ReplanningCycleID = c.Scope.OperationID
+			if c.Origin == collaboration.ReplanningAutonomous {
+				decision.Snapshot.CurrentAttempt.AutonomousReplanningReturns = 1
+			}
+		}
+	}
+	if recoveredPending || decision.Reason == workflow.Reason("replanning_requested") {
+		state, err := readCollaborationTx(ctx, tx, workflowID)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE review_admission_requests SET status='CANCELLED',updated_at=clock_timestamp() WHERE workflow_id=$1 AND status IN ('WAITING','RELEASED')`, workflowID); err != nil {
+			return err
+		}
+		if err = state.ActivateReplanning(decision.Snapshot.ReplanningCycleID, decision.Snapshot.CurrentAttempt.ID); err != nil {
+			return err
+		}
+		c := state.ActiveReplanning()
+		pair := state.CurrentCheckpoint()
+		if err = enqueueCollaborationStatusTx(ctx, tx, workflowID, "replanning:"+c.Scope.OperationID, "Implementation is paused for Planner investigation of "+pair.Reference+". Concern: "+c.Concern.Commitment+". Consequences: "+c.Concern.Consequences+fmt.Sprintf(". Autonomous returns used: %d/3 in this Attempt. Published work and the existing Change Proposal are retained.", decision.Snapshot.CurrentAttempt.AutonomousReplanningReturns)+" The Planner will explain whether commitments remain unchanged or renewed exact-pair authorization is needed.", &state); err != nil {
+			return err
+		}
+		if err = saveCollaborationTx(ctx, tx, workflowID, state); err != nil {
+			return err
+		}
+	}
 	if decision.Reason == workflow.ReasonClosureSettled {
 		if err := requireClosureSettlementBarrier(ctx, tx, workflowID, current); err != nil {
 			return err
@@ -905,10 +964,10 @@ VALUES ($1, $2, $3, $4, 'ACTIVE', TRUE, $5, $6, $7, $8, $9)`, attempt.ID,
 		}
 		if _, err := tx.Exec(ctx, `
 		UPDATE workflow_attempts SET infrastructure_failures = $3, infrastructure_failure_limit = $4,
-		    current_stage = $5, review_usage = $6, ci_repair_usage=$7, updated_at = clock_timestamp()
+		    current_stage = $5, review_usage = $6, autonomous_replanning_returns=$7, ci_repair_usage=$8, updated_at = clock_timestamp()
 WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 			int(attempt.InfrastructureRetryBudget.Used), int(attempt.InfrastructureRetryBudget.Limit),
-			attempt.CurrentStage, reviewUsage, attempt.CIRepairUsage); err != nil {
+			attempt.CurrentStage, reviewUsage, attempt.AutonomousReplanningReturns, attempt.CIRepairUsage); err != nil {
 			return fmt.Errorf("persist workflow attempt budgets: %w", err)
 		}
 	}
@@ -1056,11 +1115,11 @@ func persistChangeProposal(ctx context.Context, tx pgx.Tx, workflowID string, sn
 	proposal := snapshot.ChangeProposal
 	result, err := tx.Exec(ctx, `
 UPDATE change_proposals
-SET head_sha = $4, ready_for_sha = $5, updated_at = clock_timestamp()
+SET head_sha = $4, ready_for_sha = $5, ready_for_plan_revision_id=$6, updated_at = clock_timestamp()
 WHERE workflow_id = $1
   AND repository_id = (SELECT repository_id FROM workflows WHERE id = $1)
   AND pull_request_id = $2 AND pull_request_number = $3 AND active`,
-		workflowID, proposal.ID, proposal.Number, proposal.HeadSHA, nullableString(proposal.ReadyForSHA))
+		workflowID, proposal.ID, proposal.Number, proposal.HeadSHA, nullableString(proposal.ReadyForSHA), nullableString(proposal.ReadyForPlanRevisionID))
 	if err != nil {
 		return fmt.Errorf("persist change proposal: %w", err)
 	}
@@ -1717,12 +1776,12 @@ WHERE workflow_id = $1 AND repository_id = (SELECT repository_id FROM workflows 
 	result, err := tx.Exec(ctx, `
 INSERT INTO change_proposal_reviews (
     repository_id, review_id, review_node_id, change_proposal_id,
-    actor_id, head_sha, accepted, normalized_event_id, agent_turn_settlement_id, workflow_internal_event_id
+    actor_id, head_sha, accepted, normalized_event_id, agent_turn_settlement_id, workflow_internal_event_id,accepted_plan_revision_id
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,$11)
 ON CONFLICT (repository_id, review_id) DO NOTHING`, repositoryID, action.Review.ID,
 		action.Review.NodeID, proposalID, action.Review.ActorID, action.Review.HeadSHA,
-		action.Accepted, nullableString(deliveryID), nullableString(settlementID), nullableString(internalEventID))
+		action.Accepted, nullableString(deliveryID), nullableString(settlementID), nullableString(internalEventID), nullableString(action.Review.AcceptedPlanRevisionID))
 	if err != nil {
 		return fmt.Errorf("record change proposal review: %w", err)
 	}

@@ -1307,7 +1307,7 @@ func mutationMetadata(tool string, scope TokenScope) MutationMetadata {
 	case ToolRequestReview:
 		metadata.ExternalResourceID = fmt.Sprintf("%d:%s", scope.Repository.ID, scope.Branch)
 		metadata.ExpectedSHA = scope.HeadSHA
-	case ToolAssessHumanInput, ToolCompletePlanning, ToolPublishPlanCheckpoint, ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
+	case ToolRequestReplanning, ToolAssessHumanInput, ToolCompletePlanning, ToolPublishPlanCheckpoint, ToolRequestClarification, ToolResolveClarification, ToolReportBlocked:
 		metadata.ExternalService = "omnigrex"
 		metadata.ExternalResourceID = scope.WorkflowID
 		if tool == ToolRequestClarification {

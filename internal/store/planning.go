@@ -119,6 +119,9 @@ func (s *Store) CompletePlanning(ctx context.Context, lease AgentTurnLease, oper
 		if err != nil {
 			return err
 		}
+		if state.ActiveReplanning() != nil {
+			return collaboration.ErrInvalid
+		}
 		if err = state.ValidatePlanning(operation, revision, turn.AgentParticipantID, turn.ID, commit, evidence, resolved); err != nil {
 			return err
 		}

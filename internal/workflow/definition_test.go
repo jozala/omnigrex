@@ -23,7 +23,7 @@ func TestBuiltinDefinitionDescribesCurrentWorkflow(t *testing.T) {
 	if !ok || implementation.Role != role.Developer || implementation.State != workflow.StateDeveloping || implementation.ReviewLimit != 0 {
 		t.Fatalf("implementation Stage = (%#v, %t)", implementation, ok)
 	}
-	if got := definition.ExpectedOutcomes(workflow.StageImplementation); !reflect.DeepEqual(got, []workflow.TurnOutcome{workflow.TurnOutcomeChangeProposalReady}) {
+	if got := definition.ExpectedOutcomes(workflow.StageImplementation); !reflect.DeepEqual(got, []workflow.TurnOutcome{workflow.TurnOutcomeReplanningRequested, workflow.TurnOutcomeChangeProposalReady}) {
 		t.Fatalf("implementation outcomes = %v", got)
 	}
 	review, ok := definition.Stage(workflow.StageReview)

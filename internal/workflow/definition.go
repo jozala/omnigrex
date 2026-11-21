@@ -107,7 +107,7 @@ func NewDefinition(catalog interface{ Contains(Role) bool }, initial StageEntry,
 				return Definition{}, fmt.Errorf("%w: invalid transition for Stage %q", ErrInvalidDefinition, stage.ID)
 			}
 			switch transition.Outcome {
-			case TurnOutcomeChangeProposalReady, TurnOutcomeChangesRequested:
+			case TurnOutcomeReplanningRequested, TurnOutcomeReplanningResolved, TurnOutcomeChangeProposalReady, TurnOutcomeChangesRequested:
 				if !successor {
 					return Definition{}, fmt.Errorf("%w: outcome requires a successor for Stage %q", ErrInvalidDefinition, stage.ID)
 				}
@@ -170,7 +170,9 @@ func (definition Definition) ValidateRolePolicies(policies role.PolicyCatalog) e
 		required := map[string]struct{}{"report_blocked": {}}
 		for _, transition := range stage.Transitions {
 			switch transition.Outcome {
-			case TurnOutcomePlanningReady:
+			case TurnOutcomeReplanningRequested:
+				required["request_replanning"] = struct{}{}
+			case TurnOutcomeReplanningResolved, TurnOutcomePlanningReady:
 				required["complete_planning"] = struct{}{}
 			case TurnOutcomeChangeProposalReady:
 				required["request_review"] = struct{}{}
@@ -284,7 +286,7 @@ func validStageID(id StageID) bool {
 
 func validTurnPurpose(purpose TurnPurpose) bool {
 	switch purpose {
-	case TurnPurposeCIRepair, TurnPurposeInitialPlanning, TurnPurposeInitialDevelopment, TurnPurposeReview, TurnPurposeRequestedChanges,
+	case TurnPurposeCIRepair, TurnPurposeReplanning, TurnPurposeResumedDevelopment, TurnPurposeInitialPlanning, TurnPurposeInitialDevelopment, TurnPurposeReview, TurnPurposeRequestedChanges,
 		TurnPurposeRetry, TurnPurposeSynchronization, TurnPurposeReactivation:
 		return true
 	default:
@@ -294,7 +296,7 @@ func validTurnPurpose(purpose TurnPurpose) bool {
 
 func validDefinitionOutcome(outcome TurnOutcome) bool {
 	switch outcome {
-	case TurnOutcomePlanningReady, TurnOutcomeChangeProposalReady, TurnOutcomeChangesRequested, TurnOutcomeApproved:
+	case TurnOutcomeReplanningRequested, TurnOutcomeReplanningResolved, TurnOutcomePlanningReady, TurnOutcomeChangeProposalReady, TurnOutcomeChangesRequested, TurnOutcomeApproved:
 		return true
 	default:
 		return false

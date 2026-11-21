@@ -1,7 +1,7 @@
-### Omnigrex discovery procedure v2
+### Omnigrex discovery procedure v3
 
 This procedure is supplied by the current Omnigrex deployment on every launch, including Session Continuation.
-Its version is `omnigrex-discovery/v2`; retain that version with each published checkpoint.
+Its version is `omnigrex-discovery/v3`; retain that version with each published checkpoint.
 Earlier checkpoint procedure versions remain historical evidence, not current execution instructions.
 Core discovery requires no repository-installed skill, runtime fetching, or delegation; no sub-agents are available.
 
@@ -109,3 +109,21 @@ Harmless accompanying text may be assessed as confirmed; application code does n
 Unanswered consequential questions require clarification, not premature readiness.
 Finish only in planning-ready after orchestrator-validated confirmation and revalidation; do not allocate implementation, create PRs or child Work Items, publish code, merge, submit native reviews, or use planning confirmation as an implementation transition.
 Closing the Issue uses existing stopping behavior; there are no new defer/reject/reopen commands.
+
+## Implementation-time returns
+
+A `REPLANNING` Turn continues this Planner's responsibility for an already-started implementation, with `planning_only` false and a retained Developer/Change Proposal.
+Read the exact accepted pair, original request and focused `replanning` record, retrieving every omitted chunk before interpretation/completion.
+Inspect the current default branch and scoped Change Proposal when present; reassess relevance after repository/head movement.
+Scoped evidence preserves each input's original Participant/source/target: do not reparent human input or fabricate consent.
+Explicitly assess delivered inputs, resolve affected historical correction fences, and ask normal clarification for consequential choices.
+Human discussion does not allocate another cycle or refund an autonomous charge.
+
+If the original accepted pair and material commitments remain valid, call `complete_planning` with `disposition: unchanged`, that revision, fresh repository/Change Proposal relevance evidence and the false-alarm rationale.
+Do not republish unchanged documents or demand another approval under still-valid existing authority.
+Withdrawal, material objections and unresolved conflicts cannot restore invalid authority by calling the concern a false alarm.
+For material changes publish a linked complete revised pair explaining changed commitments, then await exact revised-pair human input.
+`confirm-plan` confirms understanding only; `implement` accepts and authorizes validated resumption, while unused resumption authority can still be withdrawn until Developer admission.
+Explicitly assess the exact consent and revalidate all relevant input/repository evidence before `complete_planning` with `disposition: revised`.
+A successful resolution queues resumption; it does not grant this Planner code-publication or native-review authority.
+New input or repository/head movement before admission reopens this same charged cycle, never a new initial Developer admission or a budget reset.

@@ -107,14 +107,15 @@ const AttemptActive AttemptLifecycle = "ACTIVE"
 
 // WorkflowAttempt is a bounded period of autonomous work started or resumed by a human, with its own retry and review budgets
 type WorkflowAttempt struct {
-	ID                        string
-	Number                    uint64
-	StartedAt                 time.Time
-	Lifecycle                 AttemptLifecycle
-	CurrentStage              StageID
-	CIRepairUsage             uint8
-	ReviewUsage               map[StageID]uint8
-	InfrastructureRetryBudget AttemptBudget
+	AutonomousReplanningReturns uint8
+	ID                          string
+	Number                      uint64
+	StartedAt                   time.Time
+	Lifecycle                   AttemptLifecycle
+	CurrentStage                StageID
+	ReviewUsage                 map[StageID]uint8
+	InfrastructureRetryBudget   AttemptBudget
+	CIRepairUsage               uint8
 }
 
 type AttemptCompletionReason string
@@ -150,19 +151,21 @@ type TurnGuard struct {
 }
 
 type ChangeProposal struct {
-	ID          int64
-	Number      int64
-	HeadSHA     string
-	Open        bool
-	ReadyForSHA string
+	ReadyForPlanRevisionID string
+	ID                     int64
+	Number                 int64
+	HeadSHA                string
+	Open                   bool
+	ReadyForSHA            string
 }
 
 type ReviewIdentity struct {
-	ID               int64
-	NodeID           string
-	ChangeProposalID int64
-	ActorID          int64
-	HeadSHA          string
+	AcceptedPlanRevisionID string
+	ID                     int64
+	NodeID                 string
+	ChangeProposalID       int64
+	ActorID                int64
+	HeadSHA                string
 }
 
 type AssignmentStatus string
@@ -196,19 +199,21 @@ type Closure struct {
 }
 
 type Snapshot struct {
-	PlanningOnly         bool
-	ClarificationWaiting bool
-	State                State
-	Revision             uint64
-	WorkItem             WorkItem
-	CurrentAttempt       *WorkflowAttempt
-	ChangeProposal       *ChangeProposal
-	ActiveTurn           *ActiveTurn
-	ContinuationStage    StageID
-	ResumeRole           Role
-	Assignments          Assignments
-	Closure              *Closure
-	LastAttemptNumber    uint64
+	ReplanningCycleID      string
+	AcceptedPlanRevisionID string
+	PlanningOnly           bool
+	ClarificationWaiting   bool
+	State                  State
+	Revision               uint64
+	WorkItem               WorkItem
+	CurrentAttempt         *WorkflowAttempt
+	ChangeProposal         *ChangeProposal
+	ActiveTurn             *ActiveTurn
+	ContinuationStage      StageID
+	ResumeRole             Role
+	Assignments            Assignments
+	Closure                *Closure
+	LastAttemptNumber      uint64
 }
 
 type Decision struct {
@@ -256,6 +261,8 @@ func (TriggerEvent) isWorkflowEvent() {}
 type TurnOutcome string
 
 const (
+	TurnOutcomeReplanningRequested  TurnOutcome = "REPLANNING_REQUESTED"
+	TurnOutcomeReplanningResolved   TurnOutcome = "REPLANNING_RESOLVED"
 	TurnOutcomePlanningReady        TurnOutcome = "PLANNING_READY"
 	TurnOutcomeClarificationWait    TurnOutcome = "CLARIFICATION_WAIT"
 	TurnOutcomeChangeProposalReady  TurnOutcome = "CHANGE_PROPOSAL_READY"
@@ -274,6 +281,9 @@ type PendingEventsObservation struct {
 
 // TurnSettledEvent records the reconciled terminal outcome of the active Agent Turn.
 type TurnSettledEvent struct {
+	ReplanningCycleID      string
+	HumanOriginReplanning  bool
+	ResolvedPlanRevisionID string
 	// ImplementationAuthorized is derived under the Work Item lock from validated collaboration, never agent prose.
 	ImplementationAuthorized bool
 	// PublicationAssociation is store-derived bookkeeping, not readiness evidence.
@@ -443,6 +453,8 @@ type TurnPurpose string
 
 const (
 	TurnPurposeCIRepair           TurnPurpose = "CI_REPAIR"
+	TurnPurposeReplanning         TurnPurpose = "REPLANNING"
+	TurnPurposeResumedDevelopment TurnPurpose = "RESUMED_DEVELOPMENT"
 	TurnPurposeInitialPlanning    TurnPurpose = "INITIAL_PLANNING"
 	TurnPurposeInitialDevelopment TurnPurpose = "INITIAL_DEVELOPMENT"
 	TurnPurposeReview             TurnPurpose = "REVIEW"

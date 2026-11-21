@@ -9,7 +9,7 @@ import (
 	"unicode/utf8"
 )
 
-const DiscoveryProcedureVersion = "omnigrex-discovery/v2"
+const DiscoveryProcedureVersion = "omnigrex-discovery/v3"
 
 type OriginalRequest struct {
 	Title  string `json:"title"`
@@ -71,7 +71,7 @@ func (e *CheckpointNotApplied) Error() string { return "checkpoint not applied: 
 // for reading the frozen batch, even when more input has also arrived.
 func (s *State) CheckpointInputReason(participant string) string {
 	for _, in := range s.Inputs {
-		if in.ParticipantID == participant && in.DeliveryPending {
+		if s.InputInScope(in, participant) && in.DeliveryPending {
 			return "unread_input"
 		}
 	}
@@ -188,7 +188,7 @@ func (s *State) ReserveCheckpoint(id, participant, turn string, c PlanningConten
 		}
 		seen[response] = true
 		i := slices.IndexFunc(s.Inputs, func(in Input) bool {
-			return in.ID == response && in.ParticipantID == participant && in.DeliveredTo != "" && (!in.DeliveryPending || in.DeliveredTo == turn) && !exactConfirmation(in.Kind)
+			return in.ID == response && s.InputInScope(in, participant) && (s.InputDeliveredInScope(in, participant) || in.ParticipantID == participant && in.DeliveredTo == turn) && !exactConfirmation(in.Kind)
 		})
 		if i < 0 {
 			return PlanningRevision{}, ErrInvalid
@@ -258,7 +258,7 @@ func (s *State) FailCheckpoint(id string) error {
 }
 func (s *State) AwaitingPlanConfirmation(participant string) bool {
 	r := s.CurrentCheckpoint()
-	return r != nil && r.Published && r.Content.Status == "proposed" && r.ParticipantID == participant && !s.Unresolved(participant) && !s.AssessmentBlocked(participant) && s.Planning.ReadyRevision == ""
+	return r != nil && r.Published && r.Content.Status == "proposed" && r.ParticipantID == participant && !s.Unresolved(participant) && !s.AssessmentBlocked(participant) && (s.Planning.ReadyRevision == "" || s.ActiveReplanning() != nil)
 }
 func (s *State) planningConfirmationTarget(target, participant string) string {
 	r := s.CurrentCheckpoint()
@@ -287,7 +287,7 @@ func (s *State) ValidatePlanning(operation, revision, participant, turn, commit,
 	}
 	v := PlanRevalidation{SourceInvocationID: operation, RevisionID: revision, ParticipantID: participant, TurnID: turn, RepositoryCommit: commit, Evidence: evidence}
 	for _, in := range s.Inputs {
-		if in.ParticipantID != participant || in.DeliveredTo == "" || in.DeliveryPending {
+		if !s.InputDeliveredInScope(in, participant) {
 			continue
 		}
 		v.ConsideredInputIDs = append(v.ConsideredInputIDs, in.ID)
@@ -324,7 +324,7 @@ func (s *State) PlanningValidationCurrent(v PlanRevalidation) bool {
 		return false
 	}
 	for _, in := range s.Inputs {
-		if in.ParticipantID == v.ParticipantID && !slices.Contains(v.ConsideredInputIDs, in.ID) {
+		if s.InputInScope(in, v.ParticipantID) && !slices.Contains(v.ConsideredInputIDs, in.ID) {
 			return false
 		}
 	}

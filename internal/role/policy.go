@@ -97,7 +97,7 @@ func NewBuiltinPolicyCatalog(referenced []ID) (PolicyCatalog, error) {
 			MCPTools: []string{
 				"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",
 				"get_check_run_diagnostics", "list_ci_runs", "get_ci_run", "get_ci_job_logs", "search_ci_job_logs",
-				"refresh_default_branch", "publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked", "request_clarification", "resolve_clarification", "assess_human_input", "get_collaboration_record",
+				"request_replanning", "refresh_default_branch", "publish_changes", "open_pr", "request_review", "confirm_prior_terminal_intent", "comment_on_issue", "comment_on_pull_request", "report_blocked", "request_clarification", "resolve_clarification", "assess_human_input", "get_collaboration_record",
 			},
 			RepositoryCredentialAuthority: OrchestratorAuthority,
 			AllowFileEdits:                true,

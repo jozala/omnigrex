@@ -58,6 +58,7 @@ func TestDeveloperListsOnlyItsFixedConcreteToolSetAfterInitialization(t *testing
 		t.Fatalf("decode tools/list: %v", err)
 	}
 	want := []string{
+		"request_replanning",
 		"get_collaboration_record", "request_clarification", "assess_human_input", "resolve_clarification",
 		"refresh_default_branch",
 		"get_issue", "list_issue_comments", "get_pull_request", "list_pull_request_reviews", "list_review_threads", "get_check_runs", "get_handoff",

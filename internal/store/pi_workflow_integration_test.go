@@ -82,6 +82,8 @@ func TestPiControlledWorkflow(t *testing.T) {
 		}
 		f.assertState(t, workflow.StatePRReady)
 	})
+	t.Run("replanning-revised", func(t *testing.T) { testPiReplanningWorkflow(t, false) })
+	t.Run("replanning-unchanged", func(t *testing.T) { testPiReplanningWorkflow(t, true) })
 	t.Run("no-pr-target", func(t *testing.T) {
 		f := newPiWorkflowFixture(t, "no-pr-target")
 		prepared := f.prepare(t)
@@ -580,11 +582,11 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	delivery.RepositoryOwner, delivery.RepositoryName = "owner", "repo"
 	claim := claimWorkflowDelivery(t, database, ctx, delivery)
 	locator := workflowLocator()
-	if mode == "planning" {
+	if mode == "planning" || strings.HasPrefix(mode, "replanning") {
 		locator.PlanningRequest = &collaboration.OriginalRequest{Title: "Make onboarding useful", Body: "A rough idea for small teams, with an initially proposed retention assumption.", Source: collaboration.Source{Channel: "qualification", ID: "original", URL: "https://example.invalid/issue"}}
 	}
 	application, err := database.CompleteWebhookTransition(ctx, claim.DeliveryID, claim.ClaimToken, normalizedPayload(claim.DeliveryID, "trigger"), locator, func(eventContext store.WorkflowEventContext) (workflow.Event, error) {
-		return workflow.TriggerEvent{PlanningOnly: mode == "planning", EventMetadata: eventContext.Metadata, AttemptID: uuid.NewString(), AttemptNumber: 1}, nil
+		return workflow.TriggerEvent{PlanningOnly: (mode == "planning" || strings.HasPrefix(mode, "replanning")), EventMetadata: eventContext.Metadata, AttemptID: uuid.NewString(), AttemptNumber: 1}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -592,7 +594,7 @@ func newPiWorkflowFixture(t *testing.T, mode string) *piWorkflowFixture {
 	github.branch = fmt.Sprintf("omnigrex/issue-%d", workflowLocator().IssueNumber)
 	loader := agentprofile.NewLoader(workflowQualificationProfiles{head: head}, configuration.Policies, allowedPaths...)
 	preparer := agentturn.NewPreparer(loader, agentprofile.SingletonSelector{}, registry, database)
-	if mode == "planning" {
+	if mode == "planning" || strings.HasPrefix(mode, "replanning") {
 		preparer = agentturn.NewPreparerWithChangeProposalVerifier(loader, agentprofile.SingletonSelector{}, registry, database, github)
 	}
 	preparer.SetReviewGate(&agentturn.ReviewGate{Store: database, Source: workflowQualificationProfiles{head: head}, Observer: github})

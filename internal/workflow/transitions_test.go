@@ -1385,7 +1385,7 @@ func settledEvent(snapshot workflow.Snapshot, id string, outcome workflow.TurnOu
 func reviewEvent(snapshot workflow.Snapshot, id string, outcome workflow.TurnOutcome, identity *workflow.ReviewIdentity, observedProposal *workflow.ChangeProposal) workflow.TurnSettledEvent {
 	event := settledEvent(snapshot, id, outcome)
 	event.Review = &workflow.ReviewIdentity{
-		ID: identity.ID, NodeID: identity.NodeID, ChangeProposalID: identity.ChangeProposalID, ActorID: identity.ActorID, HeadSHA: identity.HeadSHA,
+		ID: identity.ID, NodeID: identity.NodeID, ChangeProposalID: identity.ChangeProposalID, ActorID: identity.ActorID, HeadSHA: identity.HeadSHA, AcceptedPlanRevisionID: identity.AcceptedPlanRevisionID,
 	}
 	event.ChangeProposal = observedProposal
 	event.AuthorizedReviewerActorID = 7001

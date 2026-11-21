@@ -488,7 +488,7 @@ func TestCIRepairRoutingCommitsOneSuccessorAndCharge(t *testing.T) {
 	for _, used := range []int{0, 2, 3} {
 		t.Run(fmt.Sprint(used), func(t *testing.T) {
 			database, pool, ctx, lease := reviewAdmissionFixture(t)
-			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET ci_repair_usage=$2,review_usage='{"review":2}' WHERE id=$1`, lease.WorkflowAttemptID, used); err != nil {
+			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET autonomous_replanning_returns=2,ci_repair_usage=$2,review_usage='{"review":2}' WHERE id=$1`, lease.WorkflowAttemptID, used); err != nil {
 				t.Fatal(err)
 			}
 			request, err := database.BeginReviewAdmission(ctx, lease)
@@ -504,16 +504,16 @@ func TestCIRepairRoutingCommitsOneSuccessorAndCharge(t *testing.T) {
 			if _, err = database.RecordReviewAdmission(ctx, lease, request.ID, store.ReviewAdmissionObservation{Generation: request.Generation, HeadSHA: request.HeadSHA, Evidence: evidence, Disposition: store.ReviewRepair}); err == nil {
 				t.Fatal("retired job accepted")
 			}
-			var usage, cycles, decisions, reviewers, active, successors int
+			var usage, cycles, decisions, reviewers, active, successors, returns int
 			var status string
-			if err := pool.QueryRow(ctx, `SELECT a.ci_repair_usage,(a.review_usage->>'review')::int,w.status,(SELECT count(*) FROM review_ci_decisions WHERE workflow_attempt_id=a.id),(SELECT count(*) FROM agent_participants WHERE workflow_id=w.id AND role='REVIEWER'),(SELECT count(*) FROM agent_turns WHERE workflow_id=w.id AND active),(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND kind='PREPARE_AGENT_TURN' AND status='AVAILABLE' AND payload->>'purpose'='CI_REPAIR') FROM workflows w JOIN workflow_attempts a ON a.workflow_id=w.id AND a.active WHERE w.id=$1`, lease.WorkflowID).Scan(&usage, &cycles, &status, &decisions, &reviewers, &active, &successors); err != nil {
+			if err := pool.QueryRow(ctx, `SELECT a.autonomous_replanning_returns,a.ci_repair_usage,(a.review_usage->>'review')::int,w.status,(SELECT count(*) FROM review_ci_decisions WHERE workflow_attempt_id=a.id),(SELECT count(*) FROM agent_participants WHERE workflow_id=w.id AND role='REVIEWER'),(SELECT count(*) FROM agent_turns WHERE workflow_id=w.id AND active),(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND kind='PREPARE_AGENT_TURN' AND status='AVAILABLE' AND payload->>'purpose'='CI_REPAIR') FROM workflows w JOIN workflow_attempts a ON a.workflow_id=w.id AND a.active WHERE w.id=$1`, lease.WorkflowID).Scan(&returns, &usage, &cycles, &status, &decisions, &reviewers, &active, &successors); err != nil {
 				t.Fatal(err)
 			}
 			wantUsage, wantSuccessors, wantState := used+1, 1, "DEVELOPING"
 			if used == 3 {
 				wantUsage, wantSuccessors, wantState = 3, 0, "NEEDS_HUMAN"
 			}
-			if usage != wantUsage || successors != wantSuccessors || status != wantState || decisions != 1 || reviewers != 0 || active != 0 || cycles != 2 {
+			if returns != 2 || usage != wantUsage || successors != wantSuccessors || status != wantState || decisions != 1 || reviewers != 0 || active != 0 || cycles != 2 {
 				t.Fatalf("usage=%d successors=%d state=%s decisions=%d reviewers=%d active=%d cycles=%d", usage, successors, status, decisions, reviewers, active, cycles)
 			}
 			if used < 3 {
@@ -531,7 +531,7 @@ func TestCIAdmissionResetOnlyOnLiteralSuccessAtAllocation(t *testing.T) {
 	for _, success := range []bool{false, true} {
 		t.Run(fmt.Sprint(success), func(t *testing.T) {
 			database, pool, ctx, lease := reviewAdmissionFixture(t)
-			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET ci_repair_usage=3 WHERE id=$1`, lease.WorkflowAttemptID); err != nil {
+			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET autonomous_replanning_returns=2,ci_repair_usage=3 WHERE id=$1`, lease.WorkflowAttemptID); err != nil {
 				t.Fatal(err)
 			}
 			request, err := database.BeginReviewAdmission(ctx, lease)
@@ -558,6 +558,10 @@ func TestCIAdmissionResetOnlyOnLiteralSuccessAtAllocation(t *testing.T) {
 			}
 			if err := pool.QueryRow(ctx, `SELECT ci_repair_usage FROM workflow_attempts WHERE id=$1`, lease.WorkflowAttemptID).Scan(&usage); err != nil || usage != want {
 				t.Fatal("reset", usage, err)
+			}
+			var returns int
+			if err := pool.QueryRow(ctx, `SELECT autonomous_replanning_returns FROM workflow_attempts WHERE id=$1`, lease.WorkflowAttemptID).Scan(&returns); err != nil || returns != 2 {
+				t.Fatal("CI success reset replanning budget", returns, err)
 			}
 			// A later charge must not be erased by replay of this admitted request.
 			if _, err := pool.Exec(ctx, `UPDATE workflow_attempts SET ci_repair_usage=1 WHERE id=$1`, lease.WorkflowAttemptID); err != nil {

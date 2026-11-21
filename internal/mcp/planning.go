@@ -192,10 +192,11 @@ func (reconciler *ProductionReconciler) reconcilePlanningCheckpoint(ctx context.
 }
 
 type completePlanningArguments struct {
-	RevisionID string `json:"revision_id"`
-	Commit     string `json:"repository_commit"`
-	Evidence   string `json:"evidence"`
-	Resolved   bool   `json:"material_decisions_resolved"`
+	Disposition string `json:"disposition,omitempty"`
+	RevisionID  string `json:"revision_id"`
+	Commit      string `json:"repository_commit"`
+	Evidence    string `json:"evidence"`
+	Resolved    bool   `json:"material_decisions_resolved"`
 }
 
 func (backend *ProductionBackend) completePlanning(ctx context.Context, in Invocation) (json.RawMessage, error) {
@@ -209,15 +210,50 @@ func (backend *ProductionBackend) completePlanning(ctx context.Context, in Invoc
 	if json.Unmarshal(in.Arguments, &args) != nil {
 		return nil, ErrInvalidInvocation
 	}
-	if err := ledger.CompletePlanning(ctx, in.lease, in.OperationID, args.RevisionID, args.Commit, args.Evidence, args.Resolved); err != nil {
+	outcome := "PLANNING_READY"
+	var err error
+	if args.Disposition != "" {
+		replan, ok := backend.clarifications.(interface {
+			CompleteReplanning(context.Context, store.AgentTurnLease, string, string, string, string, string, bool) error
+		})
+		if !ok {
+			return nil, ErrToolDependency
+		}
+		err = replan.CompleteReplanning(ctx, in.lease, in.OperationID, args.RevisionID, args.Commit, args.Evidence, args.Disposition, args.Resolved)
+		outcome = "REPLANNING_RESOLVED"
+	} else {
+		err = ledger.CompletePlanning(ctx, in.lease, in.OperationID, args.RevisionID, args.Commit, args.Evidence, args.Resolved)
+	}
+	if err != nil {
 		if errors.Is(err, collaboration.ErrInvalid) {
 			return nil, ErrInvalidInvocation
 		}
 		return nil, OutcomeUnknown(err)
 	}
-	return json.Marshal(map[string]any{"outcome": "PLANNING_READY", "revision_id": args.RevisionID, "repository_commit": args.Commit})
+	return json.Marshal(map[string]any{"outcome": outcome, "revision_id": args.RevisionID, "repository_commit": args.Commit})
 }
 func (reconciler *ProductionReconciler) reconcilePlanningCompletion(ctx context.Context, scope store.AgentTurnMutationReconciliationContext, mutation store.MutationReservation) (MutationReconciliationResult, error) {
+	var args completePlanningArguments
+	if json.Unmarshal(mutation.Request, &args) != nil {
+		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+	}
+	if args.Disposition != "" {
+		ledger, ok := reconciler.clarifications.(interface {
+			GetReplanningResolution(context.Context, string, string) (collaboration.ReplanningResolution, error)
+		})
+		if !ok {
+			return unresolvedReconciliation(), nil
+		}
+		v, err := ledger.GetReplanningResolution(ctx, scope.WorkflowID, mutation.ID)
+		if err != nil {
+			return unresolvedReconciliation(), nil
+		}
+		if v.OperationID != mutation.ID || v.TurnID != mutation.AgentTurnID || v.RevisionID != args.RevisionID || v.RepositoryCommit != args.Commit || v.Evidence != args.Evidence || v.Disposition != args.Disposition || !args.Resolved || scope.Role != "PLANNER" || mutation.ExternalService != "omnigrex" || mutation.ExternalResourceID != scope.WorkflowID {
+			return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
+		}
+		raw, _ := json.Marshal(map[string]any{"outcome": "REPLANNING_RESOLVED", "revision_id": v.RevisionID, "repository_commit": v.RepositoryCommit})
+		return foundReconciliation(raw), nil
+	}
 	ledger, ok := reconciler.clarifications.(interface {
 		GetPlanningValidation(context.Context, string, string) (collaboration.PlanRevalidation, error)
 	})
@@ -228,7 +264,6 @@ func (reconciler *ProductionReconciler) reconcilePlanningCompletion(ctx context.
 	if err != nil {
 		return unresolvedReconciliation(), nil
 	}
-	var args completePlanningArguments
 	if json.Unmarshal(mutation.Request, &args) != nil || !args.Resolved || v.SourceInvocationID != mutation.ID || v.ParticipantID != scope.Turn.AgentParticipantID || v.RevisionID != args.RevisionID || v.RepositoryCommit != args.Commit || v.Evidence != args.Evidence || scope.Role != "PLANNER" || mutation.ExternalService != "omnigrex" || mutation.ExternalResourceID != scope.WorkflowID {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}

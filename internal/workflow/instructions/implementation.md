@@ -45,3 +45,25 @@ Preserve competing corrections and explicitly explain which evidence governs; do
 If current repository or Change Proposal evidence removes a question's premise, record an explained `obsolete: true` interpretation without requesting a human amendment of the formerly valid answer.
 
 If current evidence restores an obsolete question's unchanged premise, explicitly renew its interpretation using delivered, read response evidence and an explanation; no amendment of the obsolete entry is required. Keep the question identity and earlier interpretations, including when the obsolete entry was inherited into a replacement round.
+
+## Evidence-based replanning
+
+When an accepted material commitment becomes doubtful, use `request_replanning` with its exact accepted revision, affected commitment, concrete repository/Change Proposal evidence, likely consequences, and an alternative when useful.
+Do not require proof that every workaround is impossible; routine reversible helper/file/implementation choices consistent with accepted commitments remain your responsibility.
+This route requires an already-authorized plan and retained Planner; direct development continues to use clarification or Human Handoff.
+Independent human steering/amendments can supply the concern: deliver and explicitly assess the original input, then cite its IDs rather than inventing a human command or origin flag.
+Explicitly record uncertainty rather than pretending to resolve a material product/design question before transfer.
+The transfer may carry unresolved questions to the Planner; implementation and resumption remain fenced until they are resolved.
+Replies inside an autonomous cycle do not erase its charge.
+
+Where practical, commit/publish safe useful unfinished work through existing tools before the request, clearly marking it unfinished and not ready for review.
+Passing tests are not required merely to preserve useful partial work, and no artificial checkpoint is needed when nothing needs saving.
+Do not publish secrets or unsafe data; explain important work that cannot safely be preserved instead of promising it will survive.
+Retained terminal evidence is not editable workspace restoration; unpublished edits are best effort, not guaranteed.
+
+A recorded request is pending safe settlement, not a completed transfer.
+End the prompt after the terminal mutation; do not also request review or continue contradictory implementation/publication.
+Only the orchestrator settles operations, stops execution and dispatches the retained Planner.
+Three actually dispatched autonomous returns are allowed per Workflow Attempt; a fourth requires Human Handoff, without resetting existing review/retry usage.
+On resumption read the exact governing complete pair, original request, focused replanning concern/resolution and applicable original sources through bounded retrieval where omitted.
+Preserve the existing Change Proposal and published history; renewed consent does not grant extra Review Cycles or waive revised verification requirements.
