@@ -192,10 +192,8 @@ func TestCIDevelopmentQualificationUsesSelectedGoldenAndPropagatesFailures(t *te
 	for _, fail := range []string{"", "golden", "development", "module-source", "unit-suite"} {
 		t.Run("fail="+fail, func(t *testing.T) {
 			dir := t.TempDir()
-			selection, err := os.ReadFile("../../agent/pi/selected-bundle.json")
-			if err != nil {
-				t.Fatal(err)
-			}
+			golden := "ghcr.io/jozala/omnigrex/pi@sha256:" + strings.Repeat("b", 64)
+			selection := []byte(fmt.Sprintf(`{"image":%q}`, golden))
 			if err := os.MkdirAll(filepath.Join(dir, "agent/pi"), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -206,9 +204,9 @@ func TestCIDevelopmentQualificationUsesSelectedGoldenAndPropagatesFailures(t *te
 			stub := `#!/bin/sh
 set -eu
 case "$*" in
-  'pull ghcr.io/jozala/omnigrex/pi@sha256:09a7f498dd0593d7bee9410d82e641498796930c85200c93ad491faf323696a5')
+  "pull $EXPECTED_GOLDEN")
     stage=golden ;;
-  'build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=ghcr.io/jozala/omnigrex/pi@sha256:09a7f498dd0593d7bee9410d82e641498796930c85200c93ad491faf323696a5 --tag omnigrex/development:dev .')
+  "build --platform linux/amd64 --file agent/environments/omnigrex/Dockerfile --target development --build-arg OMNIGREX_GOLDEN_IMAGE=$EXPECTED_GOLDEN --tag omnigrex/development:dev .")
     test -f golden
     stage=development ;;
   *) echo "unexpected Docker command: $*" >&2; exit 2 ;;
@@ -229,11 +227,11 @@ touch "$stage"
 					t.Fatal(err)
 				}
 			}
-			err = nil
+			var err error
 			for _, run := range commands {
 				cmd := exec.Command("sh", "-ec", run)
 				cmd.Dir = dir
-				cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "FAIL=" + fail}
+				cmd.Env = []string{"PATH=" + dir + ":" + os.Getenv("PATH"), "FAIL=" + fail, "EXPECTED_GOLDEN=" + golden}
 				if output, runErr := cmd.CombinedOutput(); runErr != nil {
 					t.Logf("qualification stopped: %s (%v)", output, runErr)
 					err = runErr

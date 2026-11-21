@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "platform": "linux/amd64",
+  "image": "ghcr.io/jozala/omnigrex/pi@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "qualification": {
+    "run_id": 500,
+    "attempt": 1,
+    "docker_job_id": 501,
+    "microsandbox_job_id": 502
+  },
+  "resources": {
+    "version": 2,
+    "node_version": "v24.13.0",
+    "mise_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "files": [
+      {"name": "runner.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "mcp-extension.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "failure-extension.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "session-state.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "session-validation.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "history-rpc.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "package.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "package-lock.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "package-integrity.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "qualify-packages.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+      {"name": "fixture-only.mjs", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+    ],
+    "bootstrap_contract": "omnigrex-environment/v1",
+    "executables": [
+      "/usr/local/bin/omnigrex-environment",
+      "/usr/local/bin/node",
+      "/usr/local/bin/mise",
+      "/usr/bin/git",
+      "/bin/sh",
+      "/usr/bin/env",
+      "/usr/bin/sha256sum",
+      "/usr/local/bin/rg",
+      "/usr/local/bin/fd"
+    ]
+  }
+}
