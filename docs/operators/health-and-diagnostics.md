@@ -79,6 +79,19 @@ If onboarding was not delivered, predates provisioning, or exceeds the enumerati
 The first Workflow then reconciles other missing managed labels.
 Wait for trigger-label availability before asking users to start work.
 
+## Uncertain label writes
+
+The [human-input waiting overlay](../users/workflow-and-labels.md#waiting-for-human-input) is reconciled separately from activation and Stage labels.
+Before sending label writes, the worker durably registers a recovery obligation in `workflow_github_label_writes`.
+A failed persistence attempt after an expired request returns leaves that obligation available to healthy workers after restart.
+Expired unresolved requests can cause label-only probes, at most once per minute per obligation, even on closed Work Items; these probes never allocate Agent Turns or reactivate work.
+A successful probe cannot establish that an older remote write has stopped, so it does not erase the original uncertainty.
+Failed probes keep the ordinary three-attempt retry and Human Handoff policy; recurrence does not reset an exhausted probe's budget.
+This includes expired leases and process death: retained attempt obligations cannot create descendant repairs or late-return correction jobs while their source corrective job is pending or failed.
+
+For authorized read-only diagnosis, correlate the obligation's source `job_id` and `lease_token` with `jobs` and `job_attempts`, and inspect `probe_job_id`, `next_probe_at`, status and `last_error`.
+Do not delete obligations or reset jobs to suppress probing; use the [existing recovery procedure](troubleshooting.md#recover-a-blocked-workflow) for an exhausted effect.
+
 ## Source-checkout diagnostics
 
 Protocol, live-provider, Workflow, recovery, and upgrade qualification use isolated source-checkout gates.

@@ -29,24 +29,27 @@ type WorkflowGitHubChangeProposal struct {
 
 // WorkflowGitHubEffectContext is the latest durable Workflow state observed under a live job fence.
 type WorkflowGitHubEffectContext struct {
-	ReviewAdmission            *ReviewAdmission
-	ReviewPresentationRevision int64
-	WorkflowID                 string
-	JobRevision                uint64
-	RepositoryID               int64
-	RepositoryOwner            string
-	RepositoryName             string
-	IssueNumber                int64
-	State                      workflow.State
-	Revision                   uint64
-	ReadyForSHA                string
-	HandoffReason              string
-	HandoffDiagnostic          string
-	SafetyDiagnostic           bool
-	ChangeProposal             *WorkflowGitHubChangeProposal
-	CleanupRequired            bool
-	CleanupIssueNumber         int64
-	CleanupPullRequestNumber   int64
+	HumanInputOnly                 bool
+	HumanInputWaiting              bool
+	HumanInputPresentationRevision int64
+	ReviewAdmission                *ReviewAdmission
+	ReviewPresentationRevision     int64
+	WorkflowID                     string
+	JobRevision                    uint64
+	RepositoryID                   int64
+	RepositoryOwner                string
+	RepositoryName                 string
+	IssueNumber                    int64
+	State                          workflow.State
+	Revision                       uint64
+	ReadyForSHA                    string
+	HandoffReason                  string
+	HandoffDiagnostic              string
+	SafetyDiagnostic               bool
+	ChangeProposal                 *WorkflowGitHubChangeProposal
+	CleanupRequired                bool
+	CleanupIssueNumber             int64
+	CleanupPullRequestNumber       int64
 	// VerificationPending reports that an active-state Workflow still has a
 	// preparation in flight for its current attempt that no successful
 	// preparation has yet validated. Visible-state reconciliation must not
@@ -67,6 +70,7 @@ type WorkflowGitHubEffectAcknowledgement struct {
 }
 
 type workflowGitHubEffectPayload struct {
+	HumanInputOnly    bool   `json:"human_input_only,omitempty"`
 	Revision          int64  `json:"revision"`
 	PullRequestNumber int64  `json:"pull_request_number"`
 	Reason            string `json:"reason,omitempty"`
@@ -94,6 +98,11 @@ func (store *Store) ClaimWorkflowGitHubEffectJob(ctx context.Context, kind, owne
 		return nil, fmt.Errorf("begin Workflow GitHub effect job claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if kind == ReconcileGitHubLabelsJobKind {
+		if err := recoverGitHubLabelWritesTx(ctx, tx); err != nil {
+			return nil, fmt.Errorf("recover uncertain label writes: %w", err)
+		}
+	}
 	if _, err := reclaimExpiredJobsTx(ctx, tx, jobClaimReclaimLimit, WorkflowActionQueue, kind); err != nil {
 		return nil, fmt.Errorf("reclaim before Workflow GitHub effect job claim: %w", err)
 	}
@@ -182,9 +191,12 @@ func (store *Store) GetWorkflowGitHubEffectContext(ctx context.Context, lease Jo
 		return WorkflowGitHubEffectContext{}, ErrWorkflowGitHubEffectFenceLost
 	}
 
+	if err := refreshHumanInputPresentationTx(ctx, tx, job.WorkflowID); err != nil {
+		return WorkflowGitHubEffectContext{}, err
+	}
 	effect := WorkflowGitHubEffectContext{
 		WorkflowID: job.WorkflowID, JobRevision: uint64(payload.Revision),
-		SafetyDiagnostic: payload.SafetyDiagnostic,
+		SafetyDiagnostic: payload.SafetyDiagnostic, HumanInputOnly: payload.HumanInputOnly,
 	}
 	err = tx.QueryRow(ctx, `
 SELECT repository_id, repository_owner, repository_name, issue_number,
@@ -245,7 +257,7 @@ SELECT EXISTS (
 		}
 	}
 
-	if err := tx.QueryRow(ctx, `SELECT review_presentation_revision FROM workflows WHERE id=$1`, job.WorkflowID).Scan(&effect.ReviewPresentationRevision); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT review_presentation_revision,human_input_waiting,human_input_presentation_revision FROM workflows WHERE id=$1`, job.WorkflowID).Scan(&effect.ReviewPresentationRevision, &effect.HumanInputWaiting, &effect.HumanInputPresentationRevision); err != nil {
 		return effect, err
 	}
 	admission, admissionErr := scanAdmission(tx.QueryRow(ctx, admissionSelect+` WHERE workflow_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, job.WorkflowID))
@@ -331,7 +343,7 @@ func (store *Store) acknowledgeWorkflowGitHubEffect(ctx context.Context, lease J
 	var payload workflowGitHubEffectPayload
 	if err := json.Unmarshal(job.Payload, &payload); err != nil || payload.Revision <= 0 ||
 		payload.SafetyDiagnostic && expectedKind != PublishHumanHandoffJobKind ||
-		observed.JobRevision != uint64(payload.Revision) || observed.SafetyDiagnostic != payload.SafetyDiagnostic {
+		observed.JobRevision != uint64(payload.Revision) || observed.SafetyDiagnostic != payload.SafetyDiagnostic || observed.HumanInputOnly != payload.HumanInputOnly {
 		return WorkflowGitHubEffectAcknowledgement{}, ErrWorkflowGitHubEffectFenceLost
 	}
 	var currentRevision uint64
@@ -350,11 +362,11 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 		return WorkflowGitHubEffectAcknowledgement{}, ErrWorkflowGitHubEffectFenceLost
 	}
 
-	var presentationRevision int64
-	if err := tx.QueryRow(ctx, `SELECT review_presentation_revision FROM workflows WHERE id=$1`, job.WorkflowID).Scan(&presentationRevision); err != nil {
+	var presentationRevision, humanInputRevision int64
+	if err := tx.QueryRow(ctx, `SELECT review_presentation_revision,human_input_presentation_revision FROM workflows WHERE id=$1`, job.WorkflowID).Scan(&presentationRevision, &humanInputRevision); err != nil {
 		return WorkflowGitHubEffectAcknowledgement{}, err
 	}
-	superseded := currentRevision != observed.Revision || currentState != observed.State || expectedKind == ReconcileGitHubLabelsJobKind && presentationRevision != observed.ReviewPresentationRevision
+	superseded := currentRevision != observed.Revision || currentState != observed.State || expectedKind == ReconcileGitHubLabelsJobKind && (presentationRevision != observed.ReviewPresentationRevision || humanInputRevision != observed.HumanInputPresentationRevision)
 	if payload.SafetyDiagnostic {
 		superseded = false
 	}
@@ -388,7 +400,11 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 		acknowledgement.CleanupRequired = true
 	} else if acknowledgement.Superseded && !cleanupPending {
 		if expectedKind == ReconcileGitHubLabelsJobKind {
-			if err := enqueueReviewPresentationTx(ctx, tx, job.WorkflowID, job.WorkflowAttemptID); err != nil {
+			if observed.HumanInputOnly {
+				if err := enqueueHumanInputPresentationTx(ctx, tx, job.WorkflowID, "human-input-correction:"+job.ID, int64(currentRevision)); err != nil {
+					return WorkflowGitHubEffectAcknowledgement{}, err
+				}
+			} else if err := enqueueReviewPresentationTx(ctx, tx, job.WorkflowID, job.WorkflowAttemptID); err != nil {
 				return WorkflowGitHubEffectAcknowledgement{}, err
 			}
 		}
@@ -419,6 +435,11 @@ FROM workflows WHERE id = $1 FOR UPDATE`, job.WorkflowID).Scan(
 			}
 		}
 		if err := failWorkflowActionJobTx(ctx, tx, job, cause.Error(), retryable, acknowledgement.RetryScheduled, retryDelay); err != nil {
+			return WorkflowGitHubEffectAcknowledgement{}, err
+		}
+	}
+	if expectedKind == ReconcileGitHubLabelsJobKind {
+		if _, err := tx.Exec(ctx, `DELETE FROM workflow_github_label_writes WHERE lease_token=$1`, lease.LeaseToken); err != nil {
 			return WorkflowGitHubEffectAcknowledgement{}, err
 		}
 	}
@@ -526,4 +547,50 @@ func validateWorkflowGitHubEffectContext(effect WorkflowGitHubEffectContext) err
 		return ErrWorkflowGitHubEffectFenceLost
 	}
 	return nil
+}
+
+// EnsureWorkflowGitHubLabelCorrection retains a correction after a caller loses
+// its lease while an external label request is in flight. It cannot acknowledge
+// the old projection or revive execution. A completed/expired historical attempt
+// proves provenance; the key permits at most one correction per lost lease.
+// Corrective jobs may spawn further repairs only after durable source success.
+func (store *Store) EnsureWorkflowGitHubLabelCorrection(ctx context.Context, lease JobLease) error {
+	if !validUUID(lease.ID) || !validUUID(lease.LeaseToken) || lease.Attempt <= 0 {
+		return ErrWorkflowGitHubEffectFenceLost
+	}
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var workflowID string
+	var revision int64
+	var recovery, sourceSucceeded bool
+	if err = tx.QueryRow(ctx, `SELECT j.workflow_id::text, (j.payload->>'revision')::bigint,
+ COALESCE(j.idempotency_key LIKE ANY($8::text[]),false), j.status='SUCCEEDED'
+ FROM jobs j JOIN job_attempts a ON a.job_id=j.id
+WHERE j.id=$1 AND j.kind=$2 AND j.queue=$3 AND a.attempt_number=$4
+ AND a.lease_token=$5 AND a.lease_owner=$6 AND j.workflow_id=$7`, lease.ID, ReconcileGitHubLabelsJobKind, WorkflowActionQueue, lease.Attempt, lease.LeaseToken, lease.LeaseOwner, lease.WorkflowID, labelRecoveryKeyPatterns).Scan(&workflowID, &revision, &recovery, &sourceSucceeded); err != nil {
+		return ErrWorkflowGitHubEffectFenceLost
+	}
+	// An unfinished or exhausted corrective job must use its own remaining
+	// attempts. Retain the uncertainty: a replacement's remote call may have
+	// finished before this old write, but its acknowledgement may not yet be
+	// committed. A later successful source can then permit a fenced repair;
+	// a failed source cannot generate a fresh budget through this return path.
+	if recovery && !sourceSucceeded {
+		return tx.Commit(ctx)
+	}
+	// Keep the original payload revision stable across replay. Workers still read
+	// current desired state; this revision is not an assertion of freshness.
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM workflows WHERE id=$1 FOR UPDATE`, workflowID).Scan(&workflowID); err != nil {
+		return err
+	}
+	if err = enqueueHumanInputPresentationTx(ctx, tx, workflowID, "human-input-lost-lease:"+lease.ID+":"+lease.LeaseToken, revision); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `DELETE FROM workflow_github_label_writes WHERE lease_token=$1`, lease.LeaseToken); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

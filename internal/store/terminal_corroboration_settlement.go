@@ -376,6 +376,9 @@ UPDATE agent_turn_settlements SET successor_job_id = $2, reconciliation_job_id =
 	if err != nil || updated.RowsAffected() != 1 {
 		return AgentTurnSettlement{}, ErrAgentTurnSettlementConflict
 	}
+	if err := refreshHumanInputPresentationTx(ctx, tx, job.WorkflowID); err != nil {
+		return AgentTurnSettlement{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return AgentTurnSettlement{}, err
 	}

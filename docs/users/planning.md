@@ -20,6 +20,8 @@ Partial answers can resume discussion; silence and unanswered questions are not 
 Ordinary comments, reactions, quoted commands, and edits/deletions of accepted comments do not control planning.
 Routine reversible details remain within the Planner's existing authority.
 
+The Issue-only [`omnigrex:waiting-for-input` observation](workflow-and-labels.md#waiting-for-human-input) distinguishes a genuine response wait from active or queued work without changing continuation or authorization.
+
 ## Checkpoints and confirmation
 
 At substantial milestones, revised directions, your request, and final review, the Planner publishes one readable Issue comment containing a **requirements brief** and a **technical plan**.

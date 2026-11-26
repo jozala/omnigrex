@@ -8,6 +8,8 @@ These short references are permanent within the Work Item; they are not shortene
 A required answer target is never inferred from the round current when the comment is processed.
 Only one published round is current for a Work Item.
 
+The Issue-only [`omnigrex:waiting-for-input` observation](workflow-and-labels.md#waiting-for-human-input) distinguishes a genuine response wait from active or queued work without changing continuation or authorization.
+
 ## Submit a complete or partial answer
 
 Create a new Issue comment with one command on its first nonblank line, then your natural-language answer:
