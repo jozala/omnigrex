@@ -2,10 +2,23 @@ package piresources
 
 import (
 	"encoding/json"
-	"slices"
+	"os"
 	"strings"
 	"testing"
 )
+
+func fixtureBundle(t *testing.T) Bundle {
+	t.Helper()
+	data, err := os.ReadFile("testdata/bundle-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := ParseBundle(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle
+}
 
 func TestSelectionIsDefensiveAndStrict(t *testing.T) {
 	b, err := SelectedBundle("linux", "amd64")
@@ -35,31 +48,41 @@ func TestSelectionIsDefensiveAndStrict(t *testing.T) {
 			t.Fatal("unsupported production platform selected")
 		}
 	}
-	// A synthetic retained inventory must remain independent of the current
-	// selection, which may now contain every checkout resource.
-	var retained ResourceContract
-	if err := json.Unmarshal(again.Resources, &retained); err != nil {
-		t.Fatal(err)
-	}
-	retained.Files = slices.DeleteFunc(retained.Files, func(file ResourceFile) bool { return file.Name == "temporary-filesystems.mjs" })
-	retainedResources, err := json.Marshal(retained)
+}
+
+func TestQualificationUsesOnlyBoundInventory(t *testing.T) {
+	bundle := fixtureBundle(t)
+	script, err := QualificationScript("amd64", bundle.Resources)
 	if err != nil {
 		t.Fatal(err)
 	}
-	script, err := QualificationScript("amd64", retainedResources)
-	if err != nil || !strings.Contains(script, "runner.mjs") || strings.Contains(script, "temporary-filesystems.mjs") {
-		t.Fatal("implicit qualification uses checkout candidate")
+	var inventory ResourceContract
+	if err := json.Unmarshal(bundle.Resources, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, inventory.NodeVersion) {
+		t.Fatal("qualification replaced bound Node version")
+	}
+	miseCheck := "printf '%s  %s\\n' '" + inventory.MiseSHA256 + "' /usr/local/bin/mise | sha256sum -c -"
+	if !strings.Contains(script, miseCheck) {
+		t.Fatal("qualification omitted bound mise checksum")
+	}
+	for _, file := range inventory.Files {
+		want := "printf '%s  %s\\n' '" + file.SHA256 + "' '/opt/omnigrex/pi/" + file.Name + "' | sha256sum -c -"
+		if !strings.Contains(script, want) {
+			t.Fatalf("qualification omitted bound checksum for %s", file.Name)
+		}
+	}
+	if got := strings.Count(script, "omnigrex_check='owned checksum "); got != len(inventory.Files) {
+		t.Fatalf("qualification checks %d files, want only the %d bound files", got, len(inventory.Files))
 	}
 	if _, err := QualificationScript("amd64", nil); err == nil {
 		t.Fatal("missing retained inventory reconstructed from selection")
 	}
 }
 
-func TestCompleteSelectedResourcesRejectUnsafeExecutableRequirements(t *testing.T) {
-	b, err := SelectedBundle("linux", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestCompleteResourcesRejectUnsafeExecutableRequirements(t *testing.T) {
+	b := fixtureBundle(t)
 	for _, mutate := range []func(*ResourceContract){
 		func(c *ResourceContract) { c.BootstrapContract = "omnigrex-environment/v2" },
 		func(c *ResourceContract) { c.Executables = nil },

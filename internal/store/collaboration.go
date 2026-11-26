@@ -39,7 +39,10 @@ func saveCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID string, stat
 		return err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO work_item_collaboration(workflow_id,state) VALUES($1,$2) ON CONFLICT(workflow_id) DO UPDATE SET state=EXCLUDED.state,updated_at=clock_timestamp()`, workflowID, raw)
-	return err
+	if err != nil {
+		return err
+	}
+	return refreshHumanInputPresentationTx(ctx, tx, workflowID)
 }
 
 // RequestClarification reserves domain identities before any human-visible effect.

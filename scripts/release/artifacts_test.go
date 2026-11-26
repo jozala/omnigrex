@@ -454,10 +454,7 @@ func TestGzipFooterCorruptionIsRejectedWithSelfConsistentOuterChecksums(t *testi
 
 func TestSelectedRuntimePackagingPreservesDistinctOrigin(t *testing.T) {
 	b := fixtureBuild()
-	bundle, err := piresources.SelectedBundle("linux", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
+	bundle := fixtureBundle(t, 2)
 	b.SchemaVersion = 2
 	b.PiBundle = &bundle
 	b.Images["pi"] = bundle.Image

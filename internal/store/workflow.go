@@ -915,7 +915,7 @@ WHERE id = $1 AND workflow_id = $2 AND active`, attempt.ID, workflowID,
 	if err := persistWorkflowActionsWithInternalProvenance(ctx, tx, deliveryID, settlementID, internalEventID, workflowID, decision, actionNamespace); err != nil {
 		return err
 	}
-	return nil
+	return refreshHumanInputPresentationTx(ctx, tx, workflowID)
 }
 
 func cancelOutstandingTerminalRevalidationTx(ctx context.Context, tx pgx.Tx, attemptID string) error {

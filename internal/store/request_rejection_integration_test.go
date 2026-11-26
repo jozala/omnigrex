@@ -133,6 +133,16 @@ func TestRequestRejectionGatewayConversationAndCorrection(t *testing.T) {
 				if len(state.Rounds) != 1 || len(state.References) != 2 || len(state.Assessments) != 1 || len(state.Rounds[0].Resolutions) != 1 || len(state.RequestRejections) != 4 || len(state.RequestAdmissionRejections) != 1 || api.posts != 0 || state.Waiting || state.Rounds[0].Artifact != nil || state.Rounds[0].Questions[0] != original[0] {
 					t.Fatal("rejection changed conversation", state, api.posts)
 				}
+				// Handled rejections must not project main's human-input waiting
+				// overlay or schedule label writes while the Turn continues.
+				var visibleWait bool
+				var presentationRevision, labelJobs int
+				if err = pool.QueryRow(ctx, `SELECT human_input_waiting,human_input_presentation_revision,(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND idempotency_key LIKE 'human-input-presentation:%') FROM workflows w WHERE id=$1`, fixture.workflowID).Scan(&visibleWait, &presentationRevision, &labelJobs); err != nil {
+					t.Fatal(err)
+				}
+				if visibleWait || presentationRevision != 0 || labelJobs != 0 {
+					t.Fatalf("rejection projected human-input waiting: waiting=%t revision=%d jobs=%d", visibleWait, presentationRevision, labelJobs)
+				}
 				corrected := []collaboration.Question{original[0]}
 				if replacement {
 					corrected = []collaboration.Question{{ID: "Q1-v2", Replaces: "Q1", Body: "Use one updated directory comment?"}}

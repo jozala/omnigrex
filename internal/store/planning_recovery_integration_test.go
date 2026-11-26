@@ -118,6 +118,13 @@ func TestPlanningRecordedTerminalRecovery(t *testing.T) {
 			if err = pool.QueryRow(ctx, `SELECT w.status,w.clarification_waiting,a.infrastructure_failures,s.workflow_outcome,t.status,(SELECT count(*) FROM jobs WHERE workflow_id=w.id AND kind='PREPARE_AGENT_TURN' AND status IN ('AVAILABLE','LEASED')) FROM workflows w JOIN workflow_attempts a ON a.id=$2 JOIN agent_turns t ON t.id=$3 JOIN agent_turn_settlements s ON s.agent_turn_id=t.id WHERE w.id=$1`, fixture.workflowID, fixture.attemptID, lease.ID).Scan(&status, &waiting, &failures, &outcome, &turnStatus, &successors); err != nil {
 				t.Fatal(err)
 			}
+			var overlay bool
+			if err = pool.QueryRow(ctx, `SELECT human_input_waiting FROM workflows WHERE id=$1`, fixture.workflowID).Scan(&overlay); err != nil {
+				t.Fatal(err)
+			}
+			if overlay != (mode == "confirmation-wait") {
+				t.Fatalf("incorrect confirmation overlay %t for %s", overlay, mode)
+			}
 			expectedState, expectedOutcome := "PLANNING", "CLARIFICATION_WAIT"
 			if mode == "complete" {
 				expectedState = "PLAN_READY"

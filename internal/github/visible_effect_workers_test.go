@@ -672,6 +672,7 @@ func (fakeVisibleEffectCredentials) RepositoryCredential(context.Context, string
 }
 
 type fakeVisibleEffectStore struct {
+	labelWriteErr          error
 	lease                  store.JobLease
 	effect                 store.WorkflowGitHubEffectContext
 	claimedQueue           string
@@ -947,5 +948,31 @@ func TestReviewProgressRecoversLostCreateResponse(t *testing.T) {
 	}
 	if len(api.comments[17]) != 1 || api.issueCreates != 2 {
 		t.Fatalf("lost response duplicated progress comment: %d", api.issueCreates)
+	}
+}
+
+func (fake *fakeVisibleEffectStore) EnsureWorkflowGitHubLabelCorrection(context.Context, store.JobLease) error {
+	return nil
+}
+
+func (fake *fakeVisibleEffectStore) BeginWorkflowGitHubLabelWrite(context.Context, store.JobLease) error {
+	return fake.labelWriteErr
+}
+
+func TestLabelWorkerDoesNotWriteWithoutDurableRecoveryObligation(t *testing.T) {
+	effect := testEffect(workflow.StateReviewing, 3)
+	effect.HumanInputWaiting = true
+	workerStore := newFakeVisibleEffectStore(store.ReconcileGitHubLabelsJobKind, effect)
+	cause := errors.New("database unavailable before write")
+	workerStore.labelWriteErr = cause
+	api := newFakeVisibleEffectAPI()
+	api.issueLabels[17] = []Label{{Name: "user-label"}}
+	processed, err := newTestLabelWorker(t, workerStore, api, testWorkerConfig()).ProcessNext(context.Background())
+	if !processed || err == nil || !strings.Contains(err.Error(), cause.Error()) {
+		t.Fatal(processed, err)
+	}
+	assertLabelNames(t, api.issueLabels[17], "user-label")
+	if workerStore.acknowledged || len(api.repositoryLabels) != len(managedLabels) {
+		t.Fatal("write escaped failed obligation registration")
 	}
 }

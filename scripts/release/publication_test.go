@@ -504,151 +504,187 @@ func TestExplicitDeclarationsRequired(t *testing.T) {
 	}
 }
 
-// Legacy provenance tests must not switch qualification protocols when the
-// repository selects a newer bundle record.
-func legacyBundleFixture(t *testing.T) piresources.Bundle {
-	t.Helper()
-	bundle, err := piresources.SelectedBundle("linux", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bundle.Version = 1
-	bundle.Qualification.Commit = ""
-	bundle.Qualification.Suite = ""
-	return bundle
-}
-
 func TestReusedBundleQualificationRequiresOriginalProvenance(t *testing.T) {
-	bundle := legacyBundleFixture(t)
-	b := fixtureBuild()
-	b.SchemaVersion = 2
-	b.PiBundle = &bundle
-	b.Images["pi"] = bundle.Image
-	origin := Build{Commit: bundle.SourceCommit, RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt}
-	jobs := []Job{
-		{ID: bundle.Qualification.DockerJobID, Name: "deploy-smoke", RunID: origin.RunID, Attempt: origin.Attempt, Commit: origin.Commit, Status: "completed", Conclusion: "success"},
-		{ID: bundle.Qualification.MicrosandboxJobID, Name: "deploy-smoke-microsandbox", RunID: origin.RunID, Attempt: origin.Attempt, Commit: origin.Commit, Status: "completed", Conclusion: "success"},
-	}
-	for _, mutation := range []string{"none", "current-build", "failure", "missing", "job-id", "attempt", "unavailable"} {
-		t.Run(mutation, func(t *testing.T) {
-			changed := append([]Job{}, jobs...)
-			switch mutation {
-			case "current-build":
-				for i := range changed {
-					changed[i].RunID = b.RunID
-					changed[i].Commit = b.Commit
-					changed[i].Attempt = b.Attempt
-				}
-			case "failure":
-				changed[1].Conclusion = "failure"
-			case "missing":
-				changed = changed[:1]
-			case "job-id":
-				changed[0].ID++
-			case "attempt":
-				changed[0].Attempt++
-			}
-			api := apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
-				if mutation == "unavailable" {
-					return nil, errors.New("unavailable")
-				}
-				return legacyBundleAPI(t, bundle, changed).call(ctx, method, path, body)
-			})
-			err := bundleQualification(t.Context(), api, b)
-			if (err == nil) != (mutation == "none") {
-				t.Fatalf("origin evidence: %v", err)
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("bundle-v%d", version), func(t *testing.T) {
+			bundle := fixtureBundle(t, version)
+			b := fixtureBuild()
+			b.SchemaVersion = 2
+			b.PiBundle = &bundle
+			b.Images["pi"] = bundle.Image
+			jobs := fixtureBundleJobs(bundle)
+			for _, mutation := range []string{"none", "current-build", "failure", "missing", "job-id", "attempt", "wrong-commit", "unavailable"} {
+				t.Run(mutation, func(t *testing.T) {
+					changed := append([]Job{}, jobs...)
+					switch mutation {
+					case "current-build":
+						for i := range changed {
+							changed[i].RunID = b.RunID
+							changed[i].Commit = b.Commit
+							changed[i].Attempt = b.Attempt
+						}
+					case "failure":
+						changed[1].Conclusion = "failure"
+					case "missing":
+						changed = changed[:1]
+					case "job-id":
+						changed[0].ID++
+					case "attempt":
+						changed[0].Attempt++
+					case "wrong-commit":
+						changed[0].Commit = strings.Repeat("e", 40)
+					}
+					evidenceAPI := bundleAPI(t, bundle, changed)
+					api := apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
+						if mutation == "unavailable" {
+							return nil, errors.New("unavailable")
+						}
+						return evidenceAPI.call(ctx, method, path, body)
+					})
+					err := bundleQualification(t.Context(), api, b)
+					if (err == nil) != (mutation == "none") {
+						t.Fatalf("origin evidence: %v", err)
+					}
+				})
 			}
 		})
 	}
 }
 
 func TestSelectedBundlePromotionPreservesBytesWithoutOriginalCI(t *testing.T) {
-	f := newGitHubFixture(t)
-	bundle := legacyBundleFixture(t)
-	b := f.build
-	b.SchemaVersion = 2
-	b.PiBundle = &bundle
-	b.Images["pi"] = bundle.Image
-	dir := filepath.Join(t.TempDir(), "candidate")
-	if err := pack(dir, filepath.Join("..", ".."), b); err != nil {
-		t.Fatal(err)
-	}
-	m, _, err := verify(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Qualification = evidence()
-	if err := writeJSON(dir, "candidate.json", m); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeChecksums(dir); err != nil {
-		t.Fatal(err)
-	}
-	f.build = b
-	f.candidateZip = zipCandidate(t, dir)
-	p := f.publication()
-	base := p.api
-	p.api = apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
-		if strings.Contains(path, fmt.Sprintf("actions/runs/%d/", bundle.Qualification.RunID)) || strings.Contains(path, "actions/artifacts/987/") || strings.Contains(path, "actions/workflows/ci.yaml") {
-			return legacyBundleAPI(t, bundle, []Job{
-				{ID: bundle.Qualification.DockerJobID, Name: "deploy-smoke", RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: bundle.SourceCommit, Status: "completed", Conclusion: "success"},
-				{ID: bundle.Qualification.MicrosandboxJobID, Name: "deploy-smoke-microsandbox", RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: bundle.SourceCommit, Status: "completed", Conclusion: "success"},
-			}).call(ctx, method, path, body)
-		}
-		return base.call(ctx, method, path, body)
-	})
-	alpha := filepath.Join(t.TempDir(), "alpha")
-	if err := p.publish(t.Context(), alphaInput(), alpha); err != nil {
-		t.Fatal(err)
-	}
-	f.ciExpired = true
-	f.requests = nil
-	// Drop all special original-runtime API support as well as current CI.
-	p.api = base
-	stable := filepath.Join(t.TempDir(), "stable")
-	if err := p.publish(t.Context(), publishInput{Channel: "stable", Version: "0.1.0", Alpha: "0.1.0-alpha.1", Notes: "Stable"}, stable); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range candidateAssets {
-		a, _ := readAsset(alpha, name)
-		b, _ := readAsset(stable, name)
-		if !bytes.Equal(a, b) {
-			t.Fatalf("promotion changed %s", name)
-		}
-	}
-	for _, request := range f.requests {
-		if strings.Contains(request, "actions/") {
-			t.Fatal("promotion required historical CI")
-		}
+	for _, version := range []int{1, 2} {
+		t.Run(fmt.Sprintf("bundle-v%d", version), func(t *testing.T) {
+			f := newGitHubFixture(t)
+			bundle := fixtureBundle(t, version)
+			b := f.build
+			b.SchemaVersion = 2
+			b.PiBundle = &bundle
+			b.Images["pi"] = bundle.Image
+			dir := filepath.Join(t.TempDir(), "candidate")
+			if err := pack(dir, filepath.Join("..", ".."), b); err != nil {
+				t.Fatal(err)
+			}
+			m, _, err := verify(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.Qualification = evidence()
+			if err := writeJSON(dir, "candidate.json", m); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeChecksums(dir); err != nil {
+				t.Fatal(err)
+			}
+			f.build = b
+			f.candidateZip = zipCandidate(t, dir)
+			p := f.publication()
+			base := p.api
+			evidenceAPI := bundleAPI(t, bundle, fixtureBundleJobs(bundle))
+			p.api = apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
+				if strings.Contains(path, fmt.Sprintf("actions/runs/%d/", bundle.Qualification.RunID)) || strings.Contains(path, "actions/artifacts/987/") || strings.Contains(path, "actions/artifacts/988/") || strings.Contains(path, "actions/workflows/ci.yaml") {
+					return evidenceAPI.call(ctx, method, path, body)
+				}
+				return base.call(ctx, method, path, body)
+			})
+			alpha := filepath.Join(t.TempDir(), "alpha")
+			if err := p.publish(t.Context(), alphaInput(), alpha); err != nil {
+				t.Fatal(err)
+			}
+			f.ciExpired = true
+			f.requests = nil
+			// Drop all special original-runtime API support as well as current CI.
+			p.api = base
+			stable := filepath.Join(t.TempDir(), "stable")
+			if err := p.publish(t.Context(), publishInput{Channel: "stable", Version: "0.1.0", Alpha: "0.1.0-alpha.1", Notes: "Stable"}, stable); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range candidateAssets {
+				a, err := readAsset(alpha, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := readAsset(stable, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(a, b) {
+					t.Fatalf("promotion changed %s", name)
+				}
+			}
+			for _, request := range f.requests {
+				if strings.Contains(request, "actions/") {
+					t.Fatal("promotion required historical CI")
+				}
+			}
+		})
 	}
 }
 
-func legacyBundleAPI(t *testing.T, bundle piresources.Bundle, jobs []Job) githubAPI {
+func fixtureBundleJobs(bundle piresources.Bundle) []Job {
+	commit := bundle.SourceCommit
+	names := []string{"deploy-smoke", "deploy-smoke-microsandbox"}
+	if bundle.Version == 2 {
+		commit = bundle.Qualification.Commit
+		names = []string{"qualify-pi-bundle-docker", "qualify-pi-bundle-microsandbox"}
+	}
+	return []Job{
+		{ID: bundle.Qualification.DockerJobID, Name: names[0], RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: commit, Status: "completed", Conclusion: "success"},
+		{ID: bundle.Qualification.MicrosandboxJobID, Name: names[1], RunID: bundle.Qualification.RunID, Attempt: bundle.Qualification.Attempt, Commit: commit, Status: "completed", Conclusion: "success"},
+	}
+}
+
+func bundleAPI(t *testing.T, bundle piresources.Bundle, jobs []Job) githubAPI {
 	t.Helper()
 	b := fixtureBuild()
 	b.Commit = bundle.SourceCommit
 	b.RunID = bundle.Qualification.RunID
 	b.Attempt = bundle.Qualification.Attempt
 	b.Images["pi"] = bundle.Image
-	dir := filepath.Join(t.TempDir(), "origin")
-	if err := pack(dir, filepath.Join("..", ".."), b); err != nil {
-		t.Fatal(err)
+	var archive []byte
+	artifacts := []Artifact{{ID: 987, Name: fmt.Sprintf("deployment-payload-%d-%d", b.RunID, b.Attempt)}}
+	run := fixtureRun(b)
+	if bundle.Version == 1 {
+		dir := filepath.Join(t.TempDir(), "origin")
+		if err := pack(dir, filepath.Join("..", ".."), b); err != nil {
+			t.Fatal(err)
+		}
+		archive = zipCandidate(t, dir)
+	} else {
+		b.Commit = bundle.Qualification.Commit
+		run = fixtureRun(b)
+		run.Event = "workflow_dispatch"
+		var zipped bytes.Buffer
+		z := zip.NewWriter(&zipped)
+		w, err := z.Create("candidate.json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(mustJSON(t, bundle.Candidate())); err != nil {
+			t.Fatal(err)
+		}
+		if err := z.Close(); err != nil {
+			t.Fatal(err)
+		}
+		archive = zipped.Bytes()
+		artifacts = []Artifact{
+			{ID: 987, Name: fmt.Sprintf("pi-bundle-docker-%d-%d", b.RunID, b.Attempt)},
+			{ID: 988, Name: fmt.Sprintf("pi-bundle-microsandbox-%d-%d", b.RunID, b.Attempt)},
+		}
 	}
-	archive := zipCandidate(t, dir)
 	return apiFunc(func(ctx context.Context, method, path string, body any) ([]byte, error) {
 		if strings.Contains(path, "actions/workflows/ci.yaml") {
 			return []byte(`{"id":12}`), nil
 		}
 		if strings.HasSuffix(path, fmt.Sprintf("actions/runs/%d/attempts/%d", b.RunID, b.Attempt)) {
-			return mustJSON(t, fixtureRun(b)), nil
+			return mustJSON(t, run), nil
 		}
 		if strings.Contains(path, fmt.Sprintf("actions/runs/%d/attempts/%d/jobs", b.RunID, b.Attempt)) {
 			return jobsJSON(t, b, jobs), nil
 		}
 		if strings.Contains(path, fmt.Sprintf("actions/runs/%d/artifacts", b.RunID)) {
-			return mustJSON(t, map[string]any{"artifacts": []Artifact{{ID: 987, Name: fmt.Sprintf("deployment-payload-%d-%d", b.RunID, b.Attempt)}}}), nil
+			return mustJSON(t, map[string]any{"artifacts": artifacts}), nil
 		}
-		if strings.Contains(path, "actions/artifacts/987/zip") {
+		if strings.Contains(path, "actions/artifacts/987/zip") || strings.Contains(path, "actions/artifacts/988/zip") {
 			return archive, nil
 		}
 		return nil, fmt.Errorf("unexpected origin API: %s", path)
@@ -656,37 +692,27 @@ func legacyBundleAPI(t *testing.T, bundle piresources.Bundle, jobs []Job) github
 }
 
 func TestLaterQualificationBindsExactCandidateNotBuildCommitOrSelection(t *testing.T) {
-	selected := legacyBundleFixture(t)
-	adopted := selected
-	adopted.Version = 2
-	adopted.SourceCommit = strings.Repeat("c", 40) // Built at C; the selection then remained R1.
-	adopted.Image = "ghcr.io/jozala/omnigrex/pi@sha256:" + strings.Repeat("c", 64)
-	adopted.Resources = piresources.CandidateContract("amd64")
-	adopted.Qualification = piresources.BundleQualification{Commit: strings.Repeat("d", 40), Suite: "pi-bundle/v1", RunID: 600, Attempt: 2, DockerJobID: 601, MicrosandboxJobID: 602}
+	selected := fixtureBundle(t, 1)
+	adopted := fixtureBundle(t, 2) // Built at C; qualified later at D while selection remained R1.
 	build := fixtureBuild()
 	build.SchemaVersion = 2
 	build.PiBundle = &adopted
 	build.Images["pi"] = adopted.Image
 	origin := Build{Commit: adopted.Qualification.Commit, RunID: 600, Attempt: 2}
-	for _, mutation := range []string{"none", "R1-digest", "wrong-inventory", "wrong-source", "wrong-job-commit", "fork", "expired", "missing", "ambiguous", "malformed", "wrong-path", "unavailable"} {
+	for _, mutation := range []string{"none", "R1-digest", "wrong-inventory", "wrong-checksum", "wrong-source", "wrong-job-commit", "fork", "expired", "missing", "ambiguous", "malformed", "wrong-path", "unavailable"} {
 		t.Run(mutation, func(t *testing.T) {
 			candidate := adopted.Candidate()
 			switch mutation {
 			case "R1-digest":
 				candidate.Image = selected.Image
 			case "wrong-inventory":
-				// Selection and candidate inventories may legitimately be equal.
-				// Change one valid hash so this remains a genuine mismatch.
+				candidate.Resources = selected.Resources
+			case "wrong-checksum":
 				var inventory piresources.ResourceContract
 				if err := json.Unmarshal(candidate.Resources, &inventory); err != nil {
 					t.Fatal(err)
 				}
-				hash := inventory.Files[0].SHA256
-				prefix := "0"
-				if hash[0] == '0' {
-					prefix = "1"
-				}
-				inventory.Files[0].SHA256 = prefix + hash[1:]
+				inventory.Files[0].SHA256 = strings.Repeat("e", 64)
 				candidate.Resources = mustJSON(t, inventory)
 			case "wrong-source":
 				candidate.SourceCommit = selected.SourceCommit
@@ -748,12 +774,12 @@ func TestLaterQualificationBindsExactCandidateNotBuildCommitOrSelection(t *testi
 		})
 	}
 	// C's successful legacy deploy jobs tested R1, not its published R2 candidate.
-	jobs := []Job{{ID: selected.Qualification.DockerJobID, Name: "deploy-smoke", RunID: selected.Qualification.RunID, Attempt: selected.Qualification.Attempt, Commit: selected.SourceCommit, Status: "completed", Conclusion: "success"}, {ID: selected.Qualification.MicrosandboxJobID, Name: "deploy-smoke-microsandbox", RunID: selected.Qualification.RunID, Attempt: selected.Qualification.Attempt, Commit: selected.SourceCommit, Status: "completed", Conclusion: "success"}}
+	jobs := fixtureBundleJobs(selected)
 	wrong := selected
 	wrong.Image = adopted.Image
 	build.PiBundle = &wrong
 	build.Images["pi"] = wrong.Image
-	if err := bundleQualification(t.Context(), legacyBundleAPI(t, selected, jobs), build); err == nil || !strings.Contains(err.Error(), "different Pi image") {
+	if err := bundleQualification(t.Context(), bundleAPI(t, selected, jobs), build); err == nil || !strings.Contains(err.Error(), "different Pi image") {
 		t.Fatalf("C's R1 smokes authorized R2: %v", err)
 	}
 }

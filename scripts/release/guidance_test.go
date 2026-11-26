@@ -1,7 +1,6 @@
 package main
 
 import (
-	piresources "github.com/jozala/omnigrex/agent/pi"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,10 +117,7 @@ func TestPublicationSummarySeparatesCandidate(t *testing.T) {
 // only the selected bundle captured in this exact payload.
 func TestGuidanceUsesPackagedSelection(t *testing.T) {
 	b := fixtureBuild()
-	bundle, err := piresources.SelectedBundle("linux", "amd64")
-	if err != nil {
-		t.Fatal(err)
-	}
+	bundle := fixtureBundle(t, 2)
 	b.SchemaVersion = 2
 	b.PiBundle = &bundle
 	b.Images["pi"] = bundle.Image
