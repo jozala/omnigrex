@@ -71,6 +71,10 @@ func (process *process) Stop(ctx context.Context, timeout time.Duration) error {
 }
 func (process *process) Remove(ctx context.Context) error { return process.owner.EnsureAbsent(ctx) }
 
+// errTransportClosed is private authority for intentional receive interruption.
+// It says nothing about process exit or successful VM cleanup.
+var errTransportClosed = errors.New("Microsandbox transport intentionally closed")
+
 // Reads use bounded SDK receive cancellation; writes have a fixed maximum wait.
 // Closing only releases the stream and its non-owning SDK handle, never the VM.
 type transport struct {
@@ -78,7 +82,7 @@ type transport struct {
 	reader  *io.PipeReader
 	writer  *io.PipeWriter
 	session stream
-	cancel  context.CancelFunc
+	cancel  context.CancelCauseFunc
 	done    chan struct{}
 	closed  bool
 	ctx     context.Context
@@ -95,7 +99,7 @@ func (transport *transport) attach(session stream, stderr io.Writer, onExit func
 		_ = session.Close()
 		return io.ErrClosedPipe
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	transport.ctx = ctx
 	transport.cancel = cancel
 	transport.session = session
@@ -173,7 +177,7 @@ func (transport *transport) Close() error {
 	_ = transport.reader.Close()
 	_ = transport.writer.Close()
 	if cancel != nil {
-		cancel()
+		cancel(errTransportClosed)
 	}
 	if done != nil {
 		select {
