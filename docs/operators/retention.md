@@ -81,7 +81,9 @@ Collection runs automatically after its original deadline under the existing irr
 Missing paths succeed, but unknown ownership, aliases, unexpected mounts, foreign owners, cancellation, inaccessible paths and resource-budget exhaustion prevent completion.
 New filesystem categories use bounded no-follow traversal and repair only owned directory permissions.
 Host preparation, publication and initialization writers share physical exclusion with collection, including inherited locks in trusted Git subprocesses.
-Deploy the writer and collector changes together on all orchestrators sharing these volumes.
+Before enabling this collector, drain and stop every prior-version orchestrator and confirm its host-side Git children have exited.
+Deploy the writer and collector changes together on all orchestrators sharing these volumes; do not run mixed versions.
+The backing filesystem must provide shared advisory file locks and Linux mount-identity reporting, and the orchestrator must own the configured directories.
 The installation-owned `.participant-storage-locks` control files intentionally remain; never delete or replace them while an orchestrator or Git child might be using them.
 Do not manually recreate old-Participant directories after collection begins.
 Fresh Assignment Generations use different identities.

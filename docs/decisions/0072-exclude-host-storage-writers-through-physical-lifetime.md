@@ -30,5 +30,5 @@ An application mutex cannot exclude another orchestrator process, and a database
 A short promotion fence cannot cover earlier staged writes.
 Persistent lock identity avoids splitting exclusion across two inodes when a late caller opens the same Participant key.
 The small installation control files remain intentionally, rather than being claimed as reclaimed Participant content.
-All orchestrators must share the configured backing paths and deploy this writer/collector contract together.
+All orchestrators must share the configured backing paths and deploy this writer/collector contract together, after prior-version orchestrators and their Git children have stopped.
 This is not a lock for installation-wide native image GC and gives no authority over external native clients.
