@@ -4,6 +4,7 @@ role: PLANNER
 runtime: pi-rpc/v2
 model: openai/gpt-6.1-sol
 thinking: medium
+max_steps: 25
 permissions:
   read: allow
   edit: allow

@@ -4,6 +4,7 @@ role: REVIEWER
 runtime: pi-rpc/v2
 model: openai/gpt-6.1-sol
 thinking: high
+max_steps: 60
 permissions:
   read: allow
   edit: deny
