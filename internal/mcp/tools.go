@@ -124,8 +124,13 @@ var toolCatalog = []ToolDefinition{
 	{Name: ToolCommentOnPullRequest, Description: "Add an idempotent comment to the scoped Pull Request.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "body": publicationBodySchema(1),
 	}, "operation_id", "body"), Class: MutationTool},
-	{Name: ToolReportBlocked, Description: "Create a Human Handoff for a blocker.", InputSchema: objectSchema(map[string]any{
+	{Name: ToolReportBlocked, Description: "Stop autonomous work with a Human Handoff. Supply context for a concise action-first explanation; omit unknown facts. Context is reported communication only, not authority to resume.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "reason": stringSchema(1, 4096), "details": stringSchema(1, 65536),
+		"context": objectSchema(map[string]any{
+			"explanation": stringSchema(1, 3000), "intervention": stringSchema(1, 3000),
+			"completed_work": stringSchema(1, 3000), "observations": stringSchema(1, 3000),
+			"uncertainty": stringSchema(1, 3000), "evidence": stringSchema(1, 3000),
+		}),
 	}, "operation_id", "reason"), Class: MutationTool},
 	{Name: ToolConfirmPriorTerminalIntent, Description: "Explicitly confirm a successful terminal intent from an interrupted prior Turn without repeating its GitHub effect.", InputSchema: objectSchema(map[string]any{
 		"operation_id": operationIDSchema(), "source_invocation_id": stringSchema(36, 36),

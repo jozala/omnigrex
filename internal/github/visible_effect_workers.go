@@ -446,7 +446,13 @@ func (worker *HumanHandoffWorker) publish(ctx context.Context, credential string
 	if err != nil {
 		return nil, err
 	}
-	body := handoffCommentBody(effect.HandoffReason, effect.HandoffDiagnostic, credential)
+	if err := effect.HandoffContext.Validate(); err != nil {
+		return nil, &ConfigurationError{Cause: err}
+	}
+	body := handoffCommentBody(effect, credential)
+	if len(body)+len(marker)+2 > 60000 {
+		return nil, &ConfigurationError{Cause: errors.New("Human Handoff exceeds safe comment size")}
+	}
 	issueNumber, err := positiveGitHubNumber(effect.IssueNumber)
 	if err != nil {
 		return nil, err
@@ -610,16 +616,6 @@ func (worker *HumanHandoffWorker) removeSupersededComments(ctx context.Context, 
 		}
 	}
 	return cleanupErr
-}
-
-func handoffCommentBody(reason, diagnostic, credential string) string {
-	reason = sanitizeHandoffText(reason, "", 160)
-	diagnostic = sanitizeHandoffText(diagnostic, credential, 0)
-	body := "Human handoff required: " + reason + "."
-	if diagnostic != "" {
-		body += "\n\n" + diagnostic
-	}
-	return body
 }
 
 func sanitizeHandoffText(value, credential string, maximumRunes int) string {

@@ -115,3 +115,5 @@ Do not copy an existing ADR into a second record.
 
 - [0070: Distinguish handled request rejection from terminal intent](0070-distinguish-handled-request-rejection-from-terminal-intent.md) - Accepted, 2026-11-19.
 
+
+- [0071: Separate Human Handoff communication from authority](0071-separate-handoff-communication-from-authority.md) - Accepted, 2026-11-27.

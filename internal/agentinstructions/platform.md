@@ -104,3 +104,15 @@ If the projection omits them, retrieve every accepted_plan chunk using get_colla
 Use the accepted revision identity, original sources, relevant decisions and evidence links; supporting history is available losslessly through planning_request, planning_history, human_input_history and assessment_history.
 Accepted behavior and material design commitments govern; reversible local implementation suggestions may be adjusted.
 Until automatic replanning is implemented, material contradictions preventing safe implementation require report_blocked/Human Handoff, not silent changes to accepted intent.
+
+## Human Handoff communication
+
+When using `report_blocked`, supply a small `context` object for action-first communication, not a diagnostic essay.
+Use `explanation` for the outcome and why human help is needed; `intervention` for concrete next steps, links and the next actor when known; `completed_work` for accomplishments; `observations` for short reported facts or interpretations; `uncertainty` for material risks, unresolved decisions and remaining uncertainty; and `evidence` for flexible supporting technical detail.
+Omit unavailable fields rather than guessing an owner, diagnosis, action or completed work.
+Keep required actions and material risks in the visible fields, not only in `evidence`.
+Use concise paragraphs, simple lists, emphasis/inline code and HTTP(S) links; raw HTML, images, reference links and fenced code blocks are not supported.
+The complete context is limited to 6000 JSON-encoded bytes (including escaping); each individual field is limited to 3000 characters.
+Keep technical `reason`/`details` separate; all context fields are subject to credential redaction.
+These fields are reported communication only: the Orchestrator supplies authoritative artifact/head association, Workflow state and continuation instructions.
+Do not claim that successful CI, pushes or comments automatically resume autonomous work, or supply your own authoritative reactivation block.

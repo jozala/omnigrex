@@ -161,3 +161,24 @@ func TestComposedGuidanceFingerprint(t *testing.T) {
 		t.Fatal("fingerprint does not cover exact bytes")
 	}
 }
+
+func TestPlatformOwnsHandoffCommunicationContractForEveryRole(t *testing.T) {
+	instructions, err := agentinstructions.Load("", role.BuiltinPolicyCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []workflow.StageID{workflow.StagePlanning, workflow.StageImplementation, workflow.StageReview} {
+		stage, _ := definition.Stage(id)
+		policy, _ := role.BuiltinPolicyCatalog().Lookup(stage.Role)
+		text := instructions.Compose(policy, stage, "", "")
+		for _, want := range []string{"report_blocked", "6000 JSON-encoded bytes", "completed_work", "uncertainty", "Orchestrator supplies authoritative artifact/head association", "Omit unavailable fields rather than guessing"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s missing %q", id, want)
+			}
+		}
+	}
+}

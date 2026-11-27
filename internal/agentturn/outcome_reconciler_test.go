@@ -1727,3 +1727,41 @@ func assertNoOutcomeCredential(t *testing.T, observation store.AgentTurnSettleme
 		t.Fatalf("outcome leaked repository credential: %s", encoded)
 	}
 }
+
+func TestBlockedContextExactEvidenceAndRedaction(t *testing.T) {
+	for _, variant := range []string{"valid", "mismatch", "unknown", "oversize"} {
+		t.Run(variant, func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleReviewer, true)
+			request.RepositoryCredential = "synthetic-repository-secret"
+			c := &workflow.HandoffContext{Explanation: "Published.\n\n- synthetic-provider-secret", Intervention: "Ask maintainer synthetic-repository-secret", CompletedWork: "synthetic-provider-secret", Observations: "synthetic-provider-secret", Uncertainty: "synthetic-provider-secret", Evidence: "synthetic-provider-secret"}
+			req := map[string]any{"operation_id": "blocked-1", "reason": "Unavailable", "context": c}
+			result := map[string]any{"outcome": "BLOCKED", "reason": "Unavailable", "context": c}
+			switch variant {
+			case "mismatch":
+				result["context"] = &workflow.HandoffContext{Explanation: "other"}
+			case "unknown":
+				result["context"] = map[string]any{"explanation": "ok", "head_sha": "forged"}
+			case "oversize":
+				c.Evidence = strings.Repeat("a", 6000)
+			}
+			rawReq, _ := json.Marshal(req)
+			rawResult, _ := json.Marshal(result)
+			mutation := outcomeSucceededMutation(1, mcp.ToolReportBlocked, "blocked-1", string(rawReq), string(rawResult), "omnigrex", outcomeWorkflowID, "")
+			reconciler := newOutcomeReconcilerWithProviders(t, &outcomeStore{mutations: []store.MutationReservation{mutation}}, &outcomeGitHub{}, json.RawMessage(`{"provider":{"apiKey":"synthetic-provider-secret"}}`), json.RawMessage(`{}`))
+			observation, err := reconciler.Reconcile(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if variant != "valid" {
+				if observation.Outcome != workflow.TurnOutcomeInfrastructureFailed || observation.HandoffContext != nil {
+					t.Fatalf("incoherent context accepted: %#v", observation)
+				}
+				return
+			}
+			raw, _ := json.Marshal(observation.HandoffContext)
+			if observation.Outcome != workflow.TurnOutcomeBlocked || strings.Contains(string(raw), "synthetic-provider-secret") || strings.Contains(string(raw), "synthetic-repository-secret") || !strings.Contains(observation.HandoffContext.Explanation, "Published.\n\n- [REDACTED]") {
+				t.Fatalf("unsafe or flattened context: %s", raw)
+			}
+		})
+	}
+}

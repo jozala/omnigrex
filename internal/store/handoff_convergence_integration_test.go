@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -21,11 +24,11 @@ import (
 func TestBlockedHandoffConvergesAcrossDeferredSynchronization(t *testing.T) {
 	for _, boundary := range []string{"before publication", "two revisions before publication", "after Issue comment", "after PR comment"} {
 		t.Run(boundary, func(t *testing.T) {
-			databases, pool := openPhaseFiveStores(t, 1)
+			databases, pool := openPhaseFiveStores(t, 2)
 			database := databases[0]
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			fixture, lease, proposal := prepareSettlementTurn(t, database, pool, ctx, 950, workflow.RoleDeveloper, "head-a")
+			fixture, lease, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 950, workflow.RoleDeveloper, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 			if _, err := pool.Exec(ctx, `UPDATE workflows SET issue_number = 951 WHERE id = $1`, fixture.workflowID); err != nil {
 				t.Fatal(err)
 			}
@@ -39,8 +42,37 @@ func TestBlockedHandoffConvergesAcrossDeferredSynchronization(t *testing.T) {
 					beforeSHA: "head-b", headSHA: "head-c", createdAt: time.Now().UTC(),
 				})
 			}
-			observation := successfulSettlementObservation(workflow.TurnOutcomeBlocked, nil)
-			observation.Diagnostic = "distinctive current blocker: external qualification required"
+			execution, err := database.GetAgentTurnExecutionContext(ctx, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &replayGatewayGitHub{}, Credentials: replayGatewayCredentials{}, Publisher: &replayGatewayPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := replayGatewayScope(lease, execution, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			scope.PullRequest = &mcp.PullRequestScope{ID: proposal.PullRequestID, Number: proposal.PullRequestNumber}
+			scope.Branch = proposal.HeadRef
+			gateway, registration := openReplayGateway(t, database, backend, scope)
+			contextReport := &workflow.HandoffContext{Explanation: "The fix is published.\n\nQualification remains incomplete.", Intervention: "Maintainer:\n- [Rerun Docker](https://example.test/docker)\n- [Rerun Linux](https://example.test/linux)", CompletedWork: "Implemented fix.", Observations: "Reported package-download failures.", Uncertainty: "Other failures remain possible.", Evidence: "Supporting test evidence."}
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolReportBlocked, map[string]any{"operation_id": "blocker-context", "reason": "distinctive current blocker", "details": "external qualification required", "context": contextReport}, false)
+			if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+			database = databases[1] // No backend-local state survives settlement/read-back.
+			credential := &integrationCredentialProvider{credential: "fixture-token"}
+			outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}, Workspace: newIntegrationOutcomeWorkspace(t), DeveloperCredentials: credential, ReviewerCredentials: credential})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := outcomes.Reconcile(ctx, agentturn.OutcomeReconciliation{Lease: lease, Execution: execution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed}})
+			if err != nil || observation.HandoffContext == nil {
+				t.Fatalf("context reconciliation = %#v, %v", observation, err)
+			}
+
 			settled, err := database.SettleAgentTurn(ctx, lease, observation)
 			if err != nil || settled.State != workflow.StateNeedsHuman || settled.ReconciliationJobID == "" {
 				t.Fatalf("blocked settlement = (%#v, %v)", settled, err)
@@ -114,7 +146,13 @@ FROM workflows w JOIN change_proposals p ON p.workflow_id = w.id AND p.active WH
 			}
 			for _, number := range []int{951, 950} {
 				comments := api.comments[number]
-				if len(comments) != 2 || !strings.HasPrefix(comments[0].Body, "human ") || !strings.Contains(comments[1].Body, observation.Diagnostic) {
+				if len(comments) != 2 || !strings.HasPrefix(comments[0].Body, "human ") || !strings.Contains(comments[1].Body, observation.Diagnostic) ||
+					!strings.Contains(comments[1].Body, "The fix is published.\n\nQualification remains incomplete.") ||
+					!strings.Contains(comments[1].Body, "- [Rerun Docker](https://example.test/docker)") ||
+					!strings.Contains(comments[1].Body, "Source observation head: `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`") ||
+					!strings.Contains(comments[1].Body, "Other failures remain possible.") ||
+					!strings.Contains(comments[1].Body, "<details>") ||
+					!strings.Contains(comments[1].Body, "Supporting test evidence.") {
 					t.Errorf("artifact %d comments = %#v, want human comment and current explanation", number, comments)
 				}
 			}

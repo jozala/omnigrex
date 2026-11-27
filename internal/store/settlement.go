@@ -67,6 +67,7 @@ type AgentTurnSettlementObservation struct {
 	ExistingReview            *workflow.ReviewIdentity           `json:"existing_review,omitempty"`
 	AuthorizedReviewerActorID int64                              `json:"authorized_reviewer_actor_id,omitempty"`
 	Diagnostic                string                             `json:"diagnostic,omitempty"`
+	HandoffContext            *workflow.HandoffContext           `json:"handoff_context,omitempty"`
 	Completion                AgentTurnCompletion                `json:"-"`
 }
 
@@ -100,6 +101,7 @@ type canonicalSettlementObservation struct {
 	ExistingReview            *workflow.ReviewIdentity           `json:"existing_review,omitempty"`
 	AuthorizedReviewerActorID int64                              `json:"authorized_reviewer_actor_id,omitempty"`
 	Diagnostic                string                             `json:"diagnostic,omitempty"`
+	HandoffContext            *workflow.HandoffContext           `json:"handoff_context,omitempty"`
 	TerminalStatus            AgentTurnStatus                    `json:"terminal_status"`
 	TerminalOutcome           json.RawMessage                    `json:"terminal_outcome,omitempty"`
 	TerminalLastError         string                             `json:"terminal_last_error,omitempty"`
@@ -202,7 +204,7 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		Outcome: canonicalObservation.Outcome, ChangeProposal: proposal, PublicationAssociation: publicationProof.projection(),
 		Review: canonicalObservation.Review, ExistingReview: canonicalObservation.ExistingReview,
 		AuthorizedReviewerActorID: canonicalObservation.AuthorizedReviewerActorID,
-		PendingEvents:             pending, Diagnostic: canonicalObservation.Diagnostic,
+		PendingEvents:             pending, Diagnostic: canonicalObservation.Diagnostic, HandoffContext: canonicalObservation.HandoffContext,
 	}
 	if err := fenceCollaborationSettlementTx(ctx, tx, job.WorkflowID, turn.AgentParticipantID, &event); err != nil {
 		return AgentTurnSettlement{}, err
@@ -612,6 +614,10 @@ func canonicalizeAgentTurnSettlementObservation(observation AgentTurnSettlementO
 	result.Review = observation.Review
 	result.ExistingReview = observation.ExistingReview
 	result.AuthorizedReviewerActorID = observation.AuthorizedReviewerActorID
+	if err := observation.HandoffContext.Validate(); err != nil {
+		return canonicalSettlementObservation{}, nil, [sha256.Size]byte{}, fmt.Errorf("%w: %v", ErrAgentTurnSettlementInvalid, err)
+	}
+	result.HandoffContext = observation.HandoffContext.Map(workflow.CleanHandoffText)
 	result.Diagnostic = sanitizeAgentTurnDiagnostic(observation.Diagnostic)
 	result.TerminalStatus = observation.Completion.Status
 	result.TerminalLastError = sanitizeAgentTurnDiagnostic(observation.Completion.LastError)

@@ -565,6 +565,30 @@ func TestProductionReconcilerReconcilesPublicationAndInternalMutations(t *testin
 		}
 	})
 
+	t.Run("legacy blocked omission", func(t *testing.T) {
+		reconciler := newProductionReconciler(t, &reconciliationGitHub{}, &reconciliationPublications{})
+		for _, request := range []string{`{"operation_id":"caller-blocked","reason":"Unavailable"}`, `{"operation_id":"caller-blocked","reason":"Unavailable","details":""}`} {
+			mutation := reconciliationMutation(mcp.ToolReportBlocked, request)
+			mutation.ExternalService, mutation.ExternalResourceID, mutation.ExpectedSHA = "omnigrex", "workflow-1", ""
+			result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
+			if err != nil || string(result.Outcome.Result) != `{"outcome":"BLOCKED","reason":"Unavailable"}` {
+				t.Fatalf("legacy recovery changed omitted fields: %#v, %v", result, err)
+			}
+		}
+	})
+
+	t.Run("report blocked with context", func(t *testing.T) {
+		reconciler := newProductionReconciler(t, &reconciliationGitHub{}, &reconciliationPublications{})
+		mutation := reconciliationMutation(mcp.ToolReportBlocked, `{"operation_id":"caller-blocked","reason":"Unavailable","context":{"explanation":"First paragraph.\n\n- Action","evidence":"Flexible evidence"}}`)
+		mutation.ExternalService = "omnigrex"
+		mutation.ExternalResourceID = "workflow-1"
+		mutation.ExpectedSHA = ""
+		result, err := reconciler.Reconcile(context.Background(), reconciliation, mutation)
+		if err != nil || string(result.Outcome.Result) != `{"outcome":"BLOCKED","reason":"Unavailable","context":{"explanation":"First paragraph.\n\n- Action","evidence":"Flexible evidence"}}` {
+			t.Fatalf("context recovery = (%#v, %v)", result, err)
+		}
+	})
+
 	t.Run("request review from Change Proposal", func(t *testing.T) {
 		reconciler := newProductionReconciler(t, &reconciliationGitHub{}, &reconciliationPublications{})
 		mutation := reconciliationMutation(mcp.ToolRequestReview, `{"operation_id":"caller-request-review","summary":"Ready"}`)

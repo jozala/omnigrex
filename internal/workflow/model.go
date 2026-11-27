@@ -288,6 +288,7 @@ type TurnSettledEvent struct {
 	HumanInputPending          bool
 	PendingEvents              PendingEventsObservation
 	Diagnostic                 string
+	HandoffContext             *HandoffContext
 	CorroborationHandoffReason Reason
 }
 
@@ -535,8 +536,10 @@ func (PreserveHumanHandoffAction) isWorkflowAction() {}
 
 // MarkHumanHandoffAction records that autonomous progress has returned to a human.
 type MarkHumanHandoffAction struct {
-	Reason     Reason
-	Diagnostic string
+	Context       *HandoffContext
+	SourceHeadSHA string
+	Reason        Reason
+	Diagnostic    string
 }
 
 func (MarkHumanHandoffAction) isWorkflowAction() {}

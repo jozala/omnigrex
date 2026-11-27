@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -983,19 +984,21 @@ func parseOpenPullRequestEvidence(mutation store.MutationReservation, repository
 
 func blockedObservation(observedAt time.Time, promptOutcome json.RawMessage, mutation store.MutationReservation, workflowID string) store.AgentTurnSettlementObservation {
 	var arguments struct {
-		OperationID string `json:"operation_id"`
-		Reason      string `json:"reason"`
-		Details     string `json:"details"`
+		OperationID string                   `json:"operation_id"`
+		Reason      string                   `json:"reason"`
+		Details     string                   `json:"details"`
+		Context     *workflow.HandoffContext `json:"context,omitempty"`
 	}
 	var result struct {
-		Outcome string `json:"outcome"`
-		Reason  string `json:"reason"`
-		Details string `json:"details"`
+		Outcome string                   `json:"outcome"`
+		Reason  string                   `json:"reason"`
+		Details string                   `json:"details"`
+		Context *workflow.HandoffContext `json:"context,omitempty"`
 	}
 	if mutation.ExternalService != "omnigrex" || mutation.ExternalResourceID != workflowID || mutation.ExpectedSHA != "" ||
 		!decodeExactObject(mutation.Request, &arguments) || arguments.OperationID != mutation.OperationID ||
 		!decodeExactObject(mutation.Result, &result) || result.Outcome != "BLOCKED" ||
-		strings.TrimSpace(result.Reason) == "" || result.Reason != arguments.Reason || result.Details != arguments.Details {
+		strings.TrimSpace(result.Reason) == "" || result.Reason != arguments.Reason || result.Details != arguments.Details || !reflect.DeepEqual(result.Context, arguments.Context) || result.Context.Validate() != nil {
 		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "report_blocked terminal evidence is malformed or incoherent")
 	}
 	diagnostic := strings.TrimSpace(result.Reason)
@@ -1003,7 +1006,7 @@ func blockedObservation(observedAt time.Time, promptOutcome json.RawMessage, mut
 		diagnostic += ": " + details
 	}
 	return store.AgentTurnSettlementObservation{
-		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic,
+		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, HandoffContext: result.Context,
 		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome},
 	}
 }
@@ -1170,6 +1173,18 @@ func infrastructureObservation(observedAt time.Time, status store.AgentTurnStatu
 }
 
 func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, secrets []string) store.AgentTurnSettlementObservation {
+	observation.HandoffContext = observation.HandoffContext.Map(func(value string) string {
+		if reconciler.providerRedactor != nil {
+			value = reconciler.providerRedactor(value)
+		}
+		value = reconciler.redactProviderDiagnostic(value)
+		for _, secret := range secrets {
+			if secret != "" {
+				value = strings.ReplaceAll(value, secret, "[REDACTED]")
+			}
+		}
+		return workflow.CleanHandoffText(value)
+	})
 	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, secrets)
 	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, secrets)
 	if observation.Outcome == workflow.TurnOutcomeBlocked && observation.Diagnostic == "" {
@@ -1345,7 +1360,7 @@ func budgetExhaustionObservation(at time.Time, outcome json.RawMessage, request 
 	_ = json.Unmarshal(outcome, &evidence)
 	evidence.StepBudgetExhausted = true
 	outcome, _ = json.Marshal(evidence)
-	return store.AgentTurnSettlementObservation{ObservedAt: at, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: outcome}}
+	return store.AgentTurnSettlementObservation{ObservedAt: at, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, HandoffContext: &workflow.HandoffContext{Explanation: "The Agent Turn reached its configured step budget before it could complete the required work."}, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: outcome}}
 }
 
 // Do not append arbitrary PromptDiagnostic to prerequisite Human Handoffs.

@@ -857,7 +857,7 @@ func TestProductionBackendPerformsInternalWorkflowMutationsWithDurableJSON(t *te
 	}
 	reviewer := productionToolScope(workflow.RoleReviewer)
 	blockedResult, err := backend.Execute(context.Background(), mcp.Invocation{
-		Name: mcp.ToolReportBlocked, Arguments: json.RawMessage(`{"operation_id":"blocked-1","reason":"Unavailable","details":"External dependency"}`),
+		Name: mcp.ToolReportBlocked, Arguments: json.RawMessage(`{"operation_id":"blocked-1","reason":"Unavailable","details":"External dependency","context":{"explanation":"Fix published.\n\nQualification incomplete.","intervention":"Maintainer: rerun CI"}}`),
 		Scope: reviewer, Class: mcp.MutationTool, OperationID: "blocked-1",
 	})
 	if err != nil || string(blockedResult) != `{"handoff_id":"human-handoff-1"}` {
@@ -866,7 +866,7 @@ func TestProductionBackendPerformsInternalWorkflowMutationsWithDurableJSON(t *te
 	if workflowBackend.requestReview.OperationID != "request-review-1" || workflowBackend.requestReview.HeadSHA != publishedHead || workflowBackend.requestReview.Summary != "Ready" {
 		t.Fatalf("RequestReview mutation = %#v", workflowBackend.requestReview)
 	}
-	if workflowBackend.reportBlocked.OperationID != "blocked-1" || workflowBackend.reportBlocked.Reason != "Unavailable" || workflowBackend.reportBlocked.Details != "External dependency" || workflowBackend.reportBlocked.Scope.Role != workflow.RoleReviewer {
+	if workflowBackend.reportBlocked.OperationID != "blocked-1" || workflowBackend.reportBlocked.Reason != "Unavailable" || workflowBackend.reportBlocked.Details != "External dependency" || workflowBackend.reportBlocked.Scope.Role != workflow.RoleReviewer || workflowBackend.reportBlocked.Context == nil || workflowBackend.reportBlocked.Context.Explanation != "Fix published.\n\nQualification incomplete." {
 		t.Fatalf("ReportBlocked mutation = %#v", workflowBackend.reportBlocked)
 	}
 	if credentials.developerCalls != 2 || credentials.reviewerCalls != 0 {
@@ -1546,5 +1546,24 @@ func TestProductionBackendReplaysOnlyDefiniteRequestRejectionAcrossHeads(t *test
 				t.Fatal(plan, err)
 			}
 		})
+	}
+}
+
+func TestBlockedLedgerContextAndEncodedLimit(t *testing.T) {
+	mutations := mcp.LedgerWorkflowMutations{}
+	c := &workflow.HandoffContext{Explanation: "Fix published.\n\nQualification incomplete.", Intervention: "Maintainer:\n- rerun CI", Evidence: "reported logs"}
+	result, err := mutations.ReportBlocked(context.Background(), mcp.ReportBlockedMutation{OperationID: "context", Reason: "Unavailable", Context: c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Context *workflow.HandoffContext `json:"context"`
+	}
+	if json.Unmarshal(result, &decoded) != nil || decoded.Context == nil || *decoded.Context != *c {
+		t.Fatalf("context not round-tripped: %s", result)
+	}
+	c.Evidence = strings.Repeat("x", 6000)
+	if _, err := mutations.ReportBlocked(context.Background(), mcp.ReportBlockedMutation{OperationID: "oversize", Reason: "Unavailable", Context: c}); err == nil {
+		t.Fatal("oversize context recorded as success")
 	}
 }
