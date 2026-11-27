@@ -151,7 +151,11 @@ func (store *Store) CollectionState(ctx context.Context, participantID string) (
 	err := store.pool.QueryRow(ctx, `SELECT EXISTS (
 SELECT 1 FROM assignment_retention_targets t JOIN assignment_retention_generations g ON g.id = t.retention_generation_id
 WHERE t.assignment_id = $1 AND t.session_id IS NULL AND g.status = 'COLLECTING'
-AND NOT EXISTS (SELECT 1 FROM agent_turns x JOIN agent_sessions s ON s.id = x.agent_session_id WHERE s.agent_participant_id = $1 AND x.active))`, participantID).Scan(&allowed)
+AND NOT EXISTS (SELECT 1 FROM agent_turns x JOIN agent_sessions s ON s.id = x.agent_session_id
+ WHERE s.agent_participant_id = $1 AND (x.active OR x.recovery_started_at IS NOT NULL AND x.runtime_stopped_at IS NULL))
+AND NOT EXISTS (SELECT 1 FROM agent_sessions s WHERE s.agent_participant_id = $1 AND s.human_prompt_token IS NOT NULL)
+AND NOT EXISTS (SELECT 1 FROM execution_reservations r
+ WHERE r.identity->>'AssignmentID' = $1::text AND (NOT r.revoked OR NOT r.creation_settled)))`, participantID).Scan(&allowed)
 	if err != nil {
 		return execution.StateRef{}, err
 	}

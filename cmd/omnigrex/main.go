@@ -58,6 +58,10 @@ func main() {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			os.Exit(runDoctorCommand(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, doctor.RunProduction, os.LookupEnv))
+		case "image-maintenance":
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			os.Exit(runImageMaintenance(ctx, os.Args[2:], os.Getenv, os.Stdout, os.Stderr, productionImageInventory, os.LookupEnv))
 		case "state":
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()

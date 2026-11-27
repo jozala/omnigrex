@@ -115,3 +115,4 @@ Do not copy an existing ADR into a second record.
 
 - [0070: Distinguish handled request rejection from terminal intent](0070-distinguish-handled-request-rejection-from-terminal-intent.md) - Accepted, 2026-11-19.
 
+- [0071: Fail closed when native image reclamation cannot be qualified](0071-fail-closed-native-image-maintenance.md) - Accepted, 2026-11-27.

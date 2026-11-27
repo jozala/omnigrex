@@ -51,3 +51,9 @@ The operator should monitor storage and [cache warnings](../operators/retention.
 Moving build output to disk does not increase execution memory or limit compiler parallelism.
 
 Next: [Repository troubleshooting](troubleshooting.md).
+
+Final Participant collection also removes its mise tool installations and owned workspace/publication remnants, not just requested tool-data directories.
+Historical completed collections are not replayed.
+Fresh Participants provision their own working-revision toolchains and regenerate caches, which may require package-network access.
+Shared native images and registry documents are not Participant-owned tool caches and are not removed by this lifecycle.
+See [complete storage collection](../operators/retention.md#complete-participant-storage-collection) for outcomes, retry behavior and exclusions.

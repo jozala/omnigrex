@@ -266,10 +266,15 @@ func (lifecycle *Lifecycle) withCapture(ctx context.Context, ref execution.Captu
 		return err
 	}
 	defer func() { _ = reader.Close() }()
-	if err := os.MkdirAll(lifecycle.publicationRoot, 0o700); err != nil {
+	paths, err := lifecycle.Paths(ref.Request.Workspace.Key.AssignmentID)
+	if err != nil {
 		return err
 	}
-	staged, err := os.MkdirTemp(lifecycle.publicationRoot, ".inspect-")
+	parent := filepath.Dir(paths.Publication)
+	if err := ensureAssignmentDirectory(lifecycle.publicationRoot, parent); err != nil {
+		return err
+	}
+	staged, err := os.MkdirTemp(parent, ".inspect-")
 	if err != nil {
 		return err
 	}
@@ -332,7 +337,7 @@ func (lifecycle *Lifecycle) CaptureTreesEqual(ctx context.Context, ref execution
 	}
 	var equal bool
 	err = lifecycle.withCapture(ctx, ref, func(directory string) error {
-		trusted, err := os.MkdirTemp(lifecycle.publicationRoot, ".corroborate-")
+		trusted, err := os.MkdirTemp(filepath.Dir(directory), ".corroborate-")
 		if err != nil {
 			return err
 		}
