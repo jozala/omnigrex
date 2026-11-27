@@ -306,7 +306,7 @@ func TestRetainedStateCollectionKeepsNeighborProtectedAndReadinessAvailable(t *t
 	if _, err := database.FinalizeAssignmentCollection(ctx, *lease, authorization.Targets); err != nil {
 		t.Fatal(err)
 	}
-	roots, truncated, err = database.ImageMaintenanceRoots(ctx, binding, 10)
+	roots, truncated, err = inventory.ImageMaintenanceRoots(ctx, binding, 10)
 	if err != nil || truncated || len(roots) != 1 || roots[0].ParticipantID != neighbor.assignmentID {
 		t.Fatalf("collected image roots: %v %v %v", roots, truncated, err)
 	}
