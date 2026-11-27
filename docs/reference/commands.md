@@ -123,3 +123,11 @@ Earlier unattributed interpretations remain history but cannot establish operati
 Every delivered input must be assessed before a pair is proposed or a Role completes work, and unresolved material uncertainty remains blocking outside the current question frontier.
 Assessment effects, including confirmation invalidation, are bound to their exact reservation; identical historical content from another operation is not recovery proof.
 Human-facing references do not replace internal reconciliation identities.
+
+## `omnigrex image-maintenance`
+
+Bounded, read-only native image protection inventory for Microsandbox deployments.
+Options: `--limit N` (default 1000, range 1-10000), repeatable `--pin EXACT_REGISTRY_IMAGE` (maximum 1000), and `--json`.
+`--apply` is recognized but always refuses with exit 1 before resource access because safe native GC is unqualified.
+Exit 0 reports successful inventory production, not complete provenance or freed space; exit 1 reports configuration/binding/access failure or refused apply; exit 2 reports invalid arguments.
+See [native maintenance](../operators/retention.md#native-image-maintenance-inventory) for prerequisites, incomplete results and the tracked dependency.

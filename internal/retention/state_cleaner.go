@@ -2,6 +2,8 @@ package retention
 
 import (
 	"context"
+	"log/slog"
+
 	"github.com/jozala/omnigrex/internal/runtime/execution"
 )
 
@@ -19,5 +21,19 @@ func (cleaner StateCleaner) CollectParticipant(ctx context.Context, participantI
 	if err != nil {
 		return err
 	}
-	return cleaner.States.Collect(ctx, ref)
+	err = cleaner.States.Collect(ctx, ref)
+	status := "absent"
+	if err != nil {
+		status = "incomplete"
+	}
+	slog.InfoContext(ctx, "Participant retained state collection", "agent_participant_id", participantID,
+		"category", "session-restore-staging-native-logs", "status", status, "reason", cleanupReason(err), "measurement", "unavailable; physical release unknown")
+	return err
+}
+
+func cleanupReason(err error) string {
+	if err != nil {
+		return "required retained-state cleanup failed; collection incomplete"
+	}
+	return "required retained-state categories absent"
 }

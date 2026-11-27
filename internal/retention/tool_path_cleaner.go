@@ -2,7 +2,7 @@ package retention
 
 import "context"
 
-// AssignmentToolPathCleaner removes disposable tool caches after the retained runtime state is gone.
+// AssignmentToolPathCleaner completes remaining Participant-owned storage after backend state collection.
 type AssignmentToolPathCleaner interface {
 	CleanupAssignmentToolPaths(context.Context, string) error
 }

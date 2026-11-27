@@ -424,14 +424,27 @@ func TestRetainedStateCollectionRemovesInterruptedRestoreCopies(t *testing.T) {
 		t.Fatalf("protected collection = %v", err)
 	}
 	source.collectable[ref.ID] = true
+	if err := states.Collect(ctx, ref); err == nil {
+		t.Fatal("unknown retained-state ownership certified complete")
+	}
+	// Unknown siblings remain untouched; only this disposable fixture's owner
+	// removes them before retrying the required-category collection.
+	for _, name := range []string{"other", ".restore-not-a-nonce"} {
+		if _, err := os.Stat(filepath.Join(parent, name)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(parent, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for range 2 {
 		if err := states.Collect(ctx, ref); err != nil {
 			t.Fatal(err)
 		}
 	}
 	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 2 || entries[0].Name() != ".restore-not-a-nonce" || entries[1].Name() != "other" {
-		t.Fatalf("collection retained Session-data copies or removed unrelated entries: %v, %v", entries, err)
+	if !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
+		t.Fatalf("required retained-state categories remain: %v %v", entries, err)
 	}
 	info, err := os.Stat(neighborState)
 	if err != nil || info.Mode().Perm() != 0500 {

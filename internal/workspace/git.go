@@ -60,7 +60,16 @@ func validWorkspaceKey(key execution.Key) bool {
 		key.ExecutionEpoch > 0 && key.RuntimeProfileName != "" && key.RuntimeProfileVersion != ""
 }
 
-func (lifecycle *Lifecycle) PrepareWorkspace(ctx context.Context, checkout Checkout) (paths Paths, err error) {
+func (lifecycle *Lifecycle) PrepareWorkspace(ctx context.Context, checkout Checkout) (result Paths, err error) {
+	err = lifecycle.withStorageWriter(ctx, checkout.AssignmentID, func(ctx context.Context) error {
+		var inner error
+		result, inner = lifecycle.rawPrepareWorkspace(ctx, checkout)
+		return inner
+	})
+	return result, err
+}
+
+func (lifecycle *Lifecycle) rawPrepareWorkspace(ctx context.Context, checkout Checkout) (paths Paths, err error) {
 	paths, err = lifecycle.Paths(checkout.AssignmentID)
 	if err != nil {
 		return Paths{}, err
@@ -169,6 +178,9 @@ func (lifecycle *Lifecycle) git(ctx context.Context, operation, directory, crede
 
 func (lifecycle *Lifecycle) gitOutput(ctx context.Context, operation, directory, credential string, extraEnvironment map[string]string, arguments ...string) (string, error) {
 	command := exec.CommandContext(ctx, lifecycle.gitExecutable, arguments...)
+	if scope, ok := ctx.Value(storageFenceKey{}).(*storageFenceScope); ok && scope.lifecycle == lifecycle && scope.active.Load() {
+		command.ExtraFiles = []*os.File{scope.file}
+	}
 	command.Dir = directory
 	command.Env = commandEnvironment(credential, "")
 	for name, value := range extraEnvironment {

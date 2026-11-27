@@ -344,3 +344,7 @@ func (singleConnectionTurn) Prompt(context.Context, store.AgentTurnLease, store.
 	return agent.Outcome{Status: agent.Rejected}, errors.New("unexpected fixture prompt")
 }
 func (singleConnectionTurn) Close() error { return nil }
+
+func (singleConnectionWorkspace) WithParticipantStorageWriter(ctx context.Context, _ string, operation func(context.Context) error) error {
+	return operation(ctx)
+}

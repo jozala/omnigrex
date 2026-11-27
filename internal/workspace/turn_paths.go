@@ -22,7 +22,16 @@ func (lifecycle *Lifecycle) toolDataRoot(assignmentID string) (string, error) {
 }
 
 // PrepareTurnPaths creates only assignment-owned paths under the existing disk-backed mise volume.
-func (lifecycle *Lifecycle) PrepareTurnPaths(ctx context.Context, assignmentID, turnID string, configuration turnconfig.Configuration, fence WorkspaceFence) (map[string]string, error) {
+func (lifecycle *Lifecycle) PrepareTurnPaths(ctx context.Context, assignmentID, turnID string, configuration turnconfig.Configuration, fence WorkspaceFence) (result map[string]string, err error) {
+	err = lifecycle.withStorageWriter(ctx, assignmentID, func(ctx context.Context) error {
+		var inner error
+		result, inner = lifecycle.rawPrepareTurnPaths(ctx, assignmentID, turnID, configuration, fence)
+		return inner
+	})
+	return result, err
+}
+
+func (lifecycle *Lifecycle) rawPrepareTurnPaths(ctx context.Context, assignmentID, turnID string, configuration turnconfig.Configuration, fence WorkspaceFence) (map[string]string, error) {
 	if !uuidtext.Valid(turnID) || lifecycle == nil {
 		return nil, ErrUnsafeAssignmentPath
 	}
@@ -94,6 +103,12 @@ func (lifecycle *Lifecycle) PrepareTurnPaths(ctx context.Context, assignmentID, 
 
 // CleanupTurnPaths removes the exact stopped turn's scratch directory; caches remain until Assignment collection.
 func (lifecycle *Lifecycle) CleanupTurnPaths(ctx context.Context, assignmentID, turnID string, fence WorkspaceFence) error {
+	return lifecycle.withStorageWriter(ctx, assignmentID, func(ctx context.Context) error {
+		return lifecycle.rawCleanupTurnPaths(ctx, assignmentID, turnID, fence)
+	})
+}
+
+func (lifecycle *Lifecycle) rawCleanupTurnPaths(ctx context.Context, assignmentID, turnID string, fence WorkspaceFence) error {
 	if lifecycle == nil || !uuidtext.Valid(turnID) {
 		return ErrUnsafeAssignmentPath
 	}
@@ -169,36 +184,9 @@ func makeOwnedToolParentsWritable(assignmentRoot string, names ...string) error 
 	return nil
 }
 
-// CleanupAssignmentToolPaths removes cached and orphaned scratch data after Assignment retention.
+// CleanupAssignmentToolPaths completes all Participant-owned storage after retained
+// state collection. The historical interface name is retained for composition.
 func (lifecycle *Lifecycle) CleanupAssignmentToolPaths(ctx context.Context, assignmentID string) error {
-	root, err := lifecycle.toolDataRoot(assignmentID)
-	if err != nil {
-		return err
-	}
-	// The caller holds Participant collection authorization. Captures are not
-	// disposable tool data: they share that protected retention boundary.
-	if exists, err := inspectOwnedDirectory(lifecycle.captureRoot); err != nil {
-		return err
-	} else if exists {
-		if err := removeOwnedWorkspaceTree(ctx, filepath.Join(lifecycle.captureRoot, "assignment-"+assignmentID)); err != nil {
-			return err
-		}
-	}
-	for _, parent := range []string{lifecycle.miseRoot, filepath.Dir(root)} {
-		exists, err := inspectOwnedDirectory(parent)
-		if err != nil || !exists {
-			return err
-		}
-	}
-	exists, err := inspectOwnedDirectory(root)
-	if err != nil || !exists {
-		return err
-	}
-	if err := makeOwnedTreeDirectoriesWritable(ctx, root); err != nil {
-		return err
-	}
-	if err := removeOwnedDirectoryTree(ctx, root); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	_, err := lifecycle.CleanupParticipantStorage(ctx, assignmentID)
+	return err
 }

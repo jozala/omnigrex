@@ -23,7 +23,20 @@ type captureManifest struct {
 
 // Capture seals one immutable operation result and preserves it across restart.
 // A retry never overwrites earlier evidence with a later workspace observation.
-func (lifecycle *Lifecycle) Capture(ctx context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
+func (lifecycle *Lifecycle) Capture(ctx context.Context, request execution.CaptureRequest) (result execution.CaptureRef, err error) {
+	// Preserve capture validation before writer admission or filesystem access.
+	if _, err := lifecycle.capturePath(request); err != nil {
+		return execution.CaptureRef{}, err
+	}
+	err = lifecycle.withStorageWriter(ctx, request.Workspace.Key.AssignmentID, func(ctx context.Context) error {
+		var inner error
+		result, inner = lifecycle.rawCapture(ctx, request)
+		return inner
+	})
+	return result, err
+}
+
+func (lifecycle *Lifecycle) rawCapture(ctx context.Context, request execution.CaptureRequest) (execution.CaptureRef, error) {
 	destination, err := lifecycle.capturePath(request)
 	if err != nil {
 		return execution.CaptureRef{}, err
@@ -261,15 +274,24 @@ func (lifecycle *Lifecycle) openCaptureArtifact(ctx context.Context, ref executi
 }
 
 func (lifecycle *Lifecycle) withCapture(ctx context.Context, ref execution.CaptureRef, inspect func(string) error) error {
+	return lifecycle.withStorageWriter(ctx, ref.Request.Workspace.Key.AssignmentID, func(ctx context.Context) error { return lifecycle.rawWithCapture(ctx, ref, inspect) })
+}
+
+func (lifecycle *Lifecycle) rawWithCapture(ctx context.Context, ref execution.CaptureRef, inspect func(string) error) error {
 	reader, err := lifecycle.OpenCapture(ctx, ref)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = reader.Close() }()
-	if err := os.MkdirAll(lifecycle.publicationRoot, 0o700); err != nil {
+	paths, err := lifecycle.Paths(ref.Request.Workspace.Key.AssignmentID)
+	if err != nil {
 		return err
 	}
-	staged, err := os.MkdirTemp(lifecycle.publicationRoot, ".inspect-")
+	parent := filepath.Dir(paths.Publication)
+	if err := ensureAssignmentDirectory(lifecycle.publicationRoot, parent); err != nil {
+		return err
+	}
+	staged, err := os.MkdirTemp(parent, ".inspect-")
 	if err != nil {
 		return err
 	}
@@ -332,7 +354,7 @@ func (lifecycle *Lifecycle) CaptureTreesEqual(ctx context.Context, ref execution
 	}
 	var equal bool
 	err = lifecycle.withCapture(ctx, ref, func(directory string) error {
-		trusted, err := os.MkdirTemp(lifecycle.publicationRoot, ".corroborate-")
+		trusted, err := os.MkdirTemp(filepath.Dir(directory), ".corroborate-")
 		if err != nil {
 			return err
 		}

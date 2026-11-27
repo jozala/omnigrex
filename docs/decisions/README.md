@@ -115,5 +115,8 @@ Do not copy an existing ADR into a second record.
 
 - [0070: Distinguish handled request rejection from terminal intent](0070-distinguish-handled-request-rejection-from-terminal-intent.md) - Accepted, 2026-11-19.
 
-
 - [0071: Separate Human Handoff communication from authority](0071-separate-handoff-communication-from-authority.md) - Accepted, 2026-11-27.
+
+- [0072: Exclude host storage writers through their physical lifetime](0072-exclude-host-storage-writers-through-physical-lifetime.md) - Accepted, 2026-11-27.
+
+- [0073: Fail closed when native image reclamation cannot be qualified](0073-fail-closed-native-image-maintenance.md) - Accepted, 2026-11-27.
