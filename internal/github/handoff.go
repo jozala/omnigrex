@@ -22,6 +22,9 @@ func safeHandoffMarkdown(value, credential string) string {
 		value = strings.ReplaceAll(value, credential, "[REDACTED]")
 	}
 	value = workflow.CleanHandoffText(value)
+	if credential != "" {
+		value = strings.ReplaceAll(value, credential, "[REDACTED]")
+	}
 	lines := strings.Split(value, "\n")
 	for i, line := range lines {
 		lines[i] = strings.TrimLeft(line, " \t")

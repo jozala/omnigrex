@@ -290,6 +290,9 @@ type TurnSettledEvent struct {
 	Diagnostic                 string
 	HandoffContext             *HandoffContext
 	CorroborationHandoffReason Reason
+	// HandoffSourceHeadSHA is presentation provenance derived from the exact
+	// publication ledger by the Store, never agent input or Turn authority.
+	HandoffSourceHeadSHA string
 }
 
 func (TurnSettledEvent) isWorkflowEvent() {}

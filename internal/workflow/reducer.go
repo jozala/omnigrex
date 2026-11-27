@@ -780,6 +780,9 @@ func reduceBlocked(next Snapshot, event TurnSettledEvent) Decision {
 	if event.PublicationAssociation != nil {
 		sourceHead = event.PublicationAssociation.HeadSHA
 	}
+	if event.HandoffSourceHeadSHA != "" {
+		sourceHead = event.HandoffSourceHeadSHA
+	}
 	next.State = StateNeedsHuman
 	next.ResumeRole = event.Turn.Role
 	next.Assignments.Status = AssignmentWaitingForHuman

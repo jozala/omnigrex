@@ -1173,17 +1173,11 @@ func infrastructureObservation(observedAt time.Time, status store.AgentTurnStatu
 }
 
 func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, secrets []string) store.AgentTurnSettlementObservation {
+	// Redact both before and after normalization: the first pass protects raw
+	// provider bundles; the last pass catches credentials reconstructed when
+	// control/format characters are removed. Downstream cleanup is idempotent.
 	observation.HandoffContext = observation.HandoffContext.Map(func(value string) string {
-		if reconciler.providerRedactor != nil {
-			value = reconciler.providerRedactor(value)
-		}
-		value = reconciler.redactProviderDiagnostic(value)
-		for _, secret := range secrets {
-			if secret != "" {
-				value = strings.ReplaceAll(value, secret, "[REDACTED]")
-			}
-		}
-		return workflow.CleanHandoffText(value)
+		return reconciler.redactCredentials(workflow.CleanHandoffText(reconciler.redactCredentials(value, secrets)), secrets)
 	})
 	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, secrets)
 	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, secrets)
@@ -1200,7 +1194,7 @@ func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.Agent
 	return observation
 }
 
-func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []string) string {
+func (reconciler *OutcomeReconciler) redactCredentials(value string, secrets []string) string {
 	if reconciler.providerRedactor != nil {
 		value = reconciler.providerRedactor(value)
 	}
@@ -1210,6 +1204,11 @@ func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []
 			value = strings.ReplaceAll(value, secret, "[REDACTED]")
 		}
 	}
+	return value
+}
+
+func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []string) string {
+	value = reconciler.redactCredentials(value, secrets)
 	value = strings.Map(func(character rune) rune {
 		if unicode.IsControl(character) {
 			return ' '
@@ -1217,6 +1216,9 @@ func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []
 		return character
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
+	// Diagnostics stay flattened. Normalize format characters before the final
+	// redaction too, so publication cleanup cannot reconstruct provider secrets.
+	value = reconciler.redactCredentials(workflow.CleanHandoffText(value), secrets)
 	runes := []rune(value)
 	if len(runes) > maxOutcomeDiagnosticRunes {
 		value = string(runes[:maxOutcomeDiagnosticRunes])

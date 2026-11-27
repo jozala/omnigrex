@@ -6,14 +6,17 @@ Implementation notes for [Work Item 235](https://github.com/jozala/omnigrex/issu
 
 `report_blocked.context` is an optional, concrete six-text-field value: explanation, intervention, completed work, observations, uncertainty and evidence.
 Each field has a distinct presentation placement; only evidence is expandable.
-The existing diagnostic sanitizers stay unchanged.
-Context passes through exact terminal evidence validation, credential redaction, canonical settlement, the reducer's passive action, and durable publication job JSON.
+Diagnostics remain flattened and bounded; normalization precedes the final credential-redaction pass so later publication cleanup cannot reconstruct secrets.
+Context passes through exact terminal evidence validation, credential redaction before and after text normalization, canonical settlement, the reducer's passive action, and durable publication job JSON.
 No schema migration or new reporting subsystem is needed.
 Recorded operations without context still reconstruct their original result shape.
 
 Normal publication reads the current revision's exact reason-matched non-safety payload.
 Tracking-only synchronization carries the immediately preceding payload's context and authoritative source observation head, not arbitrary historical prose.
-Newly published heads come from settlement publication proof; otherwise the source is the Turn's expected head.
+For an initially opened PR, the source head comes from settlement publication proof.
+For an already-bound PR, settlement derives it from the exact Turn/epoch's successful publication ledger, validating repository/branch, result and publication-head linkage.
+Disconnected ancestor replays cannot rewind a repaired starting head; without a connected publication, the source remains the Turn's expected head.
+This provenance never replaces frozen Turn authority or updates the tracked PR head.
 This never drives transitions, authorization, qualification or automatic recovery.
 See [decision 0071](../decisions/0071-separate-handoff-communication-from-authority.md).
 

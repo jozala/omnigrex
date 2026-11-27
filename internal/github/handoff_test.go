@@ -75,3 +75,11 @@ func TestAcceptedContextFitsCompletePublication(t *testing.T) {
 		t.Fatalf("accepted report not publishable: %d bytes", len(body))
 	}
 }
+
+func TestHandoffPublicationRedactsNormalizedCredential(t *testing.T) {
+	c := &workflow.HandoffContext{Explanation: "synthetic-\u200bsecret", Intervention: "synthetic-\x00secret", Evidence: "synthetic-secret"}
+	body := handoffCommentBody(store.WorkflowGitHubEffectContext{State: workflow.StateNeedsHuman, HandoffReason: "agent_blocked", HandoffContext: c}, "synthetic-secret")
+	if strings.Contains(body, "synthetic-secret") || strings.Count(body, `\[REDACTED\]`) != 3 {
+		t.Fatal("publication normalization bypassed credential redaction")
+	}
+}

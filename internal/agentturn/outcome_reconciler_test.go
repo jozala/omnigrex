@@ -1765,3 +1765,32 @@ func TestBlockedContextExactEvidenceAndRedaction(t *testing.T) {
 		})
 	}
 }
+
+func TestBlockedContextNormalizationCannotReconstructCredentials(t *testing.T) {
+	for _, separator := range []string{"\u200b", "\u202e", "\x00", "\x1f"} {
+		t.Run(fmt.Sprintf("separator_%x", []rune(separator)), func(t *testing.T) {
+			request := outcomeRequest(t, workflow.RoleReviewer, true)
+			request.RepositoryCredential = "synthetic-repository-secret"
+			text := "First paragraph.\n\n- synthetic-" + separator + "provider-secret\n- synthetic-" + separator + "repository-secret\n- synthetic-" + separator + "reviewer-secret"
+			c := &workflow.HandoffContext{Explanation: text, Intervention: text, CompletedWork: text, Observations: text, Uncertainty: text, Evidence: text}
+			req, _ := json.Marshal(map[string]any{"operation_id": "blocked-1", "reason": "Unavailable", "details": text, "context": c})
+			result, _ := json.Marshal(map[string]any{"outcome": "BLOCKED", "reason": "Unavailable", "details": text, "context": c})
+			m := outcomeSucceededMutation(1, mcp.ToolReportBlocked, "blocked-1", string(req), string(result), "omnigrex", outcomeWorkflowID, "")
+			reconciler := newOutcomeReconcilerWithProviders(t, &outcomeStore{mutations: []store.MutationReservation{m}}, &outcomeGitHub{}, json.RawMessage(`{"provider":{"apiKey":"synthetic-provider-secret"}}`), json.RawMessage(`{"reviewer":{"apiKey":"synthetic-reviewer-secret"}}`))
+			observation, err := reconciler.Reconcile(context.Background(), request)
+			if err != nil || observation.Outcome != workflow.TurnOutcomeBlocked || observation.HandoffContext == nil {
+				t.Fatalf("Reconcile = %#v, %v", observation, err)
+			}
+			encoded, _ := json.Marshal(observation.HandoffContext)
+			for _, secret := range []string{"synthetic-provider-secret", "synthetic-repository-secret", "synthetic-reviewer-secret"} {
+				if strings.Contains(string(encoded), secret) || strings.Contains(workflow.CleanHandoffText(observation.Diagnostic), secret) {
+					t.Errorf("normalization reconstructed %q", secret)
+				}
+			}
+			cleanedAgain := observation.HandoffContext.Map(workflow.CleanHandoffText)
+			if *cleanedAgain != *observation.HandoffContext || strings.Count(string(encoded), "[REDACTED]") != 18 || !strings.Contains(observation.HandoffContext.Explanation, "First paragraph.\n\n- [REDACTED]") {
+				t.Errorf("context lost redaction or paragraphs: %s", encoded)
+			}
+		})
+	}
+}

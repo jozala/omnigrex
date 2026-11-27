@@ -190,6 +190,14 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		}
 	}
 
+	var handoffSourceHead string
+	if compatible && canonicalObservation.Outcome == workflow.TurnOutcomeBlocked {
+		handoffSourceHead, err = deriveHandoffSourceHeadTx(ctx, tx, job, turn, role, publicationProof)
+		if err != nil {
+			return AgentTurnSettlement{}, err
+		}
+	}
+
 	event := workflow.TurnSettledEvent{
 		EventMetadata: workflow.EventMetadata{
 			ID: settlementID, ObservedAt: canonicalObservation.ObservedAt,
@@ -204,7 +212,7 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 		Outcome: canonicalObservation.Outcome, ChangeProposal: proposal, PublicationAssociation: publicationProof.projection(),
 		Review: canonicalObservation.Review, ExistingReview: canonicalObservation.ExistingReview,
 		AuthorizedReviewerActorID: canonicalObservation.AuthorizedReviewerActorID,
-		PendingEvents:             pending, Diagnostic: canonicalObservation.Diagnostic, HandoffContext: canonicalObservation.HandoffContext,
+		PendingEvents:             pending, Diagnostic: canonicalObservation.Diagnostic, HandoffContext: canonicalObservation.HandoffContext, HandoffSourceHeadSHA: handoffSourceHead,
 	}
 	if err := fenceCollaborationSettlementTx(ctx, tx, job.WorkflowID, turn.AgentParticipantID, &event); err != nil {
 		return AgentTurnSettlement{}, err
