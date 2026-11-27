@@ -119,3 +119,23 @@ func TestSessionExportExcludesRuntimeLogs(t *testing.T) {
 		t.Fatal("session not exported")
 	}
 }
+
+func TestCollectRefusesConfiguredRootAliasEvenWhenParticipantAbsent(t *testing.T) {
+	_, source, parent := collectionFixture(t)
+	source.allowed = true
+	root := filepath.Dir(parent)
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "state-root")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	state, err := New(alias, source.ref.Backend, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Collect(context.Background(), source.ref); err == nil {
+		t.Fatal("configured root alias certified absent Participant data")
+	}
+}

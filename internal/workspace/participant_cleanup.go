@@ -408,3 +408,17 @@ func RemoveRetainedStorageTree(ctx context.Context, path string, allowRootLink b
 	var bytes int64
 	return removeStorageTree(ctx, parent, name, 0, &budget, &bytes)
 }
+
+// ValidateRetainedStorageRoot verifies the configured backend mount even when a
+// Participant tree is already absent after partial collection. An alias or a
+// missing global root is not evidence that the original Participant data is gone.
+func ValidateRetainedStorageRoot(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	root, err := openStorageRoot(path)
+	if err != nil {
+		return err
+	}
+	return root.Close()
+}

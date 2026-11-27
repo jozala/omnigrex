@@ -182,6 +182,9 @@ func (state *RetainedState) Collect(ctx context.Context, ref execution.StateRef)
 	if err != nil {
 		return err
 	}
+	if err := workspace.ValidateRetainedStorageRoot(ctx, state.root); err != nil {
+		return err
+	}
 	root, err := os.OpenRoot(state.root)
 	if err != nil {
 		return err
