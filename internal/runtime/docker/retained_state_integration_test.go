@@ -262,7 +262,7 @@ setInterval(() => {}, 1000);
 		}
 	}
 	entries, err := os.ReadDir(parent)
-	if err != nil || len(entries) != 0 {
+	if !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
 		t.Fatalf("authorized collection retained Session-data copies: %v, %v", entries, err)
 	}
 	if _, err := os.Stat(filepath.Join(neighborCopy, "history.json")); err != nil {

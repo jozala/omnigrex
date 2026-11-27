@@ -22,7 +22,16 @@ func (lifecycle *Lifecycle) toolDataRoot(assignmentID string) (string, error) {
 }
 
 // PrepareTurnPaths creates only assignment-owned paths under the existing disk-backed mise volume.
-func (lifecycle *Lifecycle) PrepareTurnPaths(ctx context.Context, assignmentID, turnID string, configuration turnconfig.Configuration, fence WorkspaceFence) (map[string]string, error) {
+func (lifecycle *Lifecycle) PrepareTurnPaths(ctx context.Context, assignmentID, turnID string, configuration turnconfig.Configuration, fence WorkspaceFence) (result map[string]string, err error) {
+	err = lifecycle.withStorageWriter(ctx, assignmentID, func(ctx context.Context) error {
+		var inner error
+		result, inner = lifecycle.rawPrepareTurnPaths(ctx, assignmentID, turnID, configuration, fence)
+		return inner
+	})
+	return result, err
+}
+
+func (lifecycle *Lifecycle) rawPrepareTurnPaths(ctx context.Context, assignmentID, turnID string, configuration turnconfig.Configuration, fence WorkspaceFence) (map[string]string, error) {
 	if !uuidtext.Valid(turnID) || lifecycle == nil {
 		return nil, ErrUnsafeAssignmentPath
 	}
@@ -94,6 +103,12 @@ func (lifecycle *Lifecycle) PrepareTurnPaths(ctx context.Context, assignmentID, 
 
 // CleanupTurnPaths removes the exact stopped turn's scratch directory; caches remain until Assignment collection.
 func (lifecycle *Lifecycle) CleanupTurnPaths(ctx context.Context, assignmentID, turnID string, fence WorkspaceFence) error {
+	return lifecycle.withStorageWriter(ctx, assignmentID, func(ctx context.Context) error {
+		return lifecycle.rawCleanupTurnPaths(ctx, assignmentID, turnID, fence)
+	})
+}
+
+func (lifecycle *Lifecycle) rawCleanupTurnPaths(ctx context.Context, assignmentID, turnID string, fence WorkspaceFence) error {
 	if lifecycle == nil || !uuidtext.Valid(turnID) {
 		return ErrUnsafeAssignmentPath
 	}

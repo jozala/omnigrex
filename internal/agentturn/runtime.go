@@ -55,6 +55,7 @@ type LauncherStore interface {
 
 // RuntimeWorkspace prepares assignment-isolated checkout and trusted tool state.
 type RuntimeWorkspace interface {
+	WithParticipantStorageWriter(context.Context, string, func(context.Context) error) error
 	Prepare(context.Context, workspace.Preparation) (execution.WorkspaceRef, error)
 	Capture(context.Context, execution.CaptureRequest) (execution.CaptureRef, error)
 	PrepareTurnPaths(context.Context, string, string, turnconfig.Configuration, workspace.WorkspaceFence) (map[string]string, error)
@@ -415,7 +416,7 @@ func (launcher *Launcher) Launch(ctx context.Context, request LaunchRequest) (ha
 	if stateRef.ParticipantID != key.AssignmentID || stateRef.SessionID != key.AgentSessionID {
 		return nil, ErrRuntimeBinding
 	}
-	if err := launcher.states.Ensure(ctx, stateRef); err != nil {
+	if err := launcher.workspace.WithParticipantStorageWriter(ctx, key.AssignmentID, func(ctx context.Context) error { return launcher.states.Ensure(ctx, stateRef) }); err != nil {
 		return nil, err
 	}
 	if err := launcher.store.MarkAgentTurnStateInitialized(ctx, request.Lease, stateRef); err != nil {

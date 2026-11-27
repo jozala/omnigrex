@@ -48,7 +48,16 @@ type PublicationResult struct {
 	Changed bool
 }
 
-func (lifecycle *Lifecycle) Publish(ctx context.Context, publication Publication) (PublicationResult, error) {
+func (lifecycle *Lifecycle) Publish(ctx context.Context, publication Publication) (result PublicationResult, err error) {
+	err = lifecycle.withStorageWriter(ctx, publication.AssignmentID, func(ctx context.Context) error {
+		var inner error
+		result, inner = lifecycle.rawPublish(ctx, publication)
+		return inner
+	})
+	return result, err
+}
+
+func (lifecycle *Lifecycle) rawPublish(ctx context.Context, publication Publication) (PublicationResult, error) {
 	paths, err := lifecycle.Paths(publication.AssignmentID)
 	if err != nil {
 		return PublicationResult{}, err

@@ -92,6 +92,9 @@ func TestCollectRuntimeLogsIsIsolatedAndIdempotent(t *testing.T) {
 	if _, err := os.Stat(neighbor); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(neighbor, filepath.Join(parent, "runtime-logs")); err != nil {
 		t.Fatal(err)
 	}

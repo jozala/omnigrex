@@ -42,7 +42,16 @@ type PublicationReconciliationResult struct {
 }
 
 // ReconcilePublication inspects a fresh orchestrator-owned clone for a publication operation.
-func (lifecycle *Lifecycle) ReconcilePublication(ctx context.Context, input PublicationReconciliation) (PublicationReconciliationResult, error) {
+func (lifecycle *Lifecycle) ReconcilePublication(ctx context.Context, input PublicationReconciliation) (result PublicationReconciliationResult, err error) {
+	err = lifecycle.withStorageWriter(ctx, input.AssignmentID, func(ctx context.Context) error {
+		var inner error
+		result, inner = lifecycle.rawReconcilePublication(ctx, input)
+		return inner
+	})
+	return result, err
+}
+
+func (lifecycle *Lifecycle) rawReconcilePublication(ctx context.Context, input PublicationReconciliation) (PublicationReconciliationResult, error) {
 	paths, err := lifecycle.Paths(input.AssignmentID)
 	if err != nil {
 		return PublicationReconciliationResult{}, err
@@ -173,6 +182,12 @@ func (lifecycle *Lifecycle) ObserveRemoteBranch(ctx context.Context, repositoryU
 // previously published head. A later Developer handoff must still compare it
 // to the agent workspace before becoming a Change Proposal.
 func (lifecycle *Lifecycle) PrepareRecoveredPublication(ctx context.Context, assignmentID, repositoryURL, credential, head string) error {
+	return lifecycle.withStorageWriter(ctx, assignmentID, func(ctx context.Context) error {
+		return lifecycle.rawPrepareRecoveredPublication(ctx, assignmentID, repositoryURL, credential, head)
+	})
+}
+
+func (lifecycle *Lifecycle) rawPrepareRecoveredPublication(ctx context.Context, assignmentID, repositoryURL, credential, head string) error {
 	if err := validateRemote(repositoryURL); err != nil {
 		return err
 	}

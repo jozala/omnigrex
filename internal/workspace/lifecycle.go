@@ -28,7 +28,10 @@ var directoryUID = func(info os.FileInfo) (int, bool) {
 	return int(stat.Uid), true
 }
 
+type StorageWriterGuard func(context.Context, string, func(context.Context) error) error
+
 type Options struct {
+	StorageWriter   StorageWriterGuard
 	WorkspaceRoot   string
 	PublicationRoot string
 	MiseRoot        string
@@ -45,6 +48,7 @@ type Paths struct {
 }
 
 type Lifecycle struct {
+	storageWriter    StorageWriterGuard
 	workspaceRoot    string
 	publicationRoot  string
 	miseRoot         string
@@ -87,7 +91,7 @@ func New(options Options) (*Lifecycle, error) {
 	}
 	return &Lifecycle{
 		workspaceRoot: workspaceRoot, publicationRoot: publicationRoot, miseRoot: miseRoot,
-		gitExecutable:    gitExecutable,
+		gitExecutable: gitExecutable, storageWriter: options.StorageWriter,
 		publicationLocks: make(map[string]*publicationLockEntry),
 		captureRoot:      captureRoot, captureSource: options.CaptureSource,
 		captureLedger: options.CaptureLedger,
@@ -133,6 +137,12 @@ func (lifecycle *Lifecycle) Discard(ctx context.Context, ref execution.Workspace
 
 // DiscardWorkspaceFenced detaches the live workspace under a short fence before cleaning the detached tree.
 func (lifecycle *Lifecycle) DiscardWorkspaceFenced(ctx context.Context, assignmentID string, epoch int64, fence WorkspaceFence) error {
+	return lifecycle.withStorageWriter(ctx, assignmentID, func(ctx context.Context) error {
+		return lifecycle.rawDiscardWorkspaceFenced(ctx, assignmentID, epoch, fence)
+	})
+}
+
+func (lifecycle *Lifecycle) rawDiscardWorkspaceFenced(ctx context.Context, assignmentID string, epoch int64, fence WorkspaceFence) error {
 	paths, err := lifecycle.Paths(assignmentID)
 	if err != nil {
 		return err

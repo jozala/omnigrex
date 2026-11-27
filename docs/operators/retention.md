@@ -80,6 +80,9 @@ Existing scheduled deadlines, including older 30-day deadlines, are unchanged.
 Collection runs automatically after its original deadline under the existing irrevocable authorization.
 Missing paths succeed, but unknown ownership, aliases, unexpected mounts, foreign owners, cancellation, inaccessible paths and resource-budget exhaustion prevent completion.
 New filesystem categories use bounded no-follow traversal and repair only owned directory permissions.
+Host preparation, publication and initialization writers share physical exclusion with collection, including inherited locks in trusted Git subprocesses.
+Deploy the writer and collector changes together on all orchestrators sharing these volumes.
+The installation-owned `.participant-storage-locks` control files intentionally remain; never delete or replace them while an orchestrator or Git child might be using them.
 Do not manually recreate old-Participant directories after collection begins.
 Fresh Assignment Generations use different identities.
 

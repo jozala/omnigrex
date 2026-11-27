@@ -2194,3 +2194,7 @@ func stringMap(values map[string]string) string {
 	}
 	return strings.Join(parts, "\n")
 }
+
+func (lifecycle *runtimeWorkspace) WithParticipantStorageWriter(ctx context.Context, _ string, operation func(context.Context) error) error {
+	return operation(ctx)
+}

@@ -22,6 +22,8 @@ Configured roots are trusted deployment configuration, not paths returned by age
 | Mise root / `assignment-ID/tool-data` | Dependency/build caches and orphan Turn scratch | Stopped Turn scratch cleanup; final Participant collection |
 | Publication root / `.default-snapshot-*` | Installation-owned snapshot acquisition scratch, no Participant identity in acquisition API | Immediate acquisition cleanup; not inferred Participant-owned |
 | Historical publication root / `.{inspect,corroborate}-*` | Anonymous staging without durable Participant attribution | Operator-managed, never assigned ownership by filename discovery |
+| Workspace root / `.participant-storage-locks/ID` | Installation-owned physical writer exclusion metadata, never unlinked during collection | Retained control metadata, not reclaimed Participant contents |
+| Native home / `omnigrex-operations` | Backend dispatch/revocation journals and lock identity | Installation control metadata, retained for safe reconciliation |
 | Native home, native image/layer/materialization cache, registry verification documents | Installation-wide shared backend lifecycle | Separate maintenance; all retained when provenance is incomplete |
 | Credentials, backups, unrelated host caches, PostgreSQL | Other owners/protected history | Never targeted |
 
@@ -32,9 +34,15 @@ Roots inside targeted Participant trees and unknown top-level Participant entrie
 
 ## Removal and recovery
 
-The existing runtime-state collector runs first and verifies backend/namespace and irrevocable collection authority.
+The backend runtime-state collector runs first and verifies backend/namespace and irrevocable collection authority.
+Mounted Session/log/restore staging removal shares the bounded no-follow tree primitive; the Docker collector additionally confirms the actual daemon volume absent.
 Collection authority additionally refuses unresolved/unrevoked creation reservations, leased human prompts and unconfirmed recovery stops, not merely active Turn rows.
-Production creation, publication, capture and tool preparation retain their existing live Turn/active Participant fences; collection never acquires heartbeat-dependent locks through tree removal.
+Production creation, publication, capture and tool preparation retain their existing live Turn/active Participant fences.
+A shared physical lock now spans host-side writes, including staged Git acquisition and Session initialization before native reservation.
+The complete cleaner holds its exclusive counterpart; durable admission is rechecked after lock acquisition.
+Trusted Git subprocesses inherit the open lock description, and lock metadata is never unlinked during collection.
+See [physical writer exclusion](../decisions/0072-exclude-host-storage-writers-through-physical-lifetime.md).
+Collection never acquires heartbeat-dependent database locks through tree removal.
 A lease loss cancels the worker but does not revoke COLLECTING authority.
 No completed collection is selected or reauthorized.
 

@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/jozala/omnigrex/internal/runtime/execution"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 // StateSource verifies binding metadata and Store collection authority.
@@ -197,32 +198,73 @@ func (state *RetainedState) Collect(ctx context.Context, ref execution.StateRef)
 		return err
 	}
 	defer parent.Close()
-	entries, err := fs.ReadDir(parent.FS(), ".")
+	directory, err := parent.Open(".")
 	if err != nil {
 		return err
 	}
+	entries, readErr := directory.ReadDir(129)
+	directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return readErr
+	}
+	backlog := len(entries) > 128
+	if backlog {
+		entries = entries[:128]
+	}
+	physicalParent := filepath.Join(state.root, filepath.FromSlash(path.Dir(location)))
 	for _, entry := range entries {
-		if restoreStagingName(entry.Name()) {
-			if err := removeStateTree(parent, entry.Name()); err != nil {
+		name := entry.Name()
+		if restoreStagingName(name) {
+			if err := workspace.RemoveRetainedStorageTree(ctx, filepath.Join(physicalParent, name), true); err != nil {
 				return fmt.Errorf("collect restore staging: %w", err)
 			}
+		} else if name != "runtime-state" && !(name == "runtime-logs" && state.binding.Family == "microsandbox") {
+			return errors.New("collect retained state: unrecognized Participant storage entry")
 		}
 	}
-	if state.cleaner != nil {
-		return state.cleaner.EnsureAbsent(ctx, ref.ParticipantID, location)
+	if backlog {
+		return workspace.ErrCleanupIncomplete
 	}
-	if state.binding.Family == "microsandbox" {
+	// The mounted backend-owned tree uses the same bounded no-follow primitive;
+	// Docker's configured collector still confirms the actual daemon volume absent.
+	if err := workspace.RemoveRetainedStorageTree(ctx, filepath.Join(physicalParent, path.Base(location)), false); err != nil {
+		return err
+	}
+	if state.cleaner != nil {
+		if err := state.cleaner.EnsureAbsent(ctx, ref.ParticipantID, location); err != nil {
+			return err
+		}
+	} else if state.binding.Family == "microsandbox" {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		// Native logs are optional host-only diagnostics, beside (never inside)
 		// guest-mounted Session state. The same irrevocable Participant collection
 		// authority above covers both, including retries after Session deletion.
-		if err := removeStateTree(parent, "runtime-logs"); err != nil {
+		if err := workspace.RemoveRetainedStorageTree(ctx, filepath.Join(physicalParent, "runtime-logs"), true); err != nil {
 			return fmt.Errorf("collect native runtime logs: %w", err)
 		}
 	}
-	return removeStateTree(parent, path.Base(location))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	original, err := parent.Stat(".")
+	if err != nil {
+		return err
+	}
+	current, err := root.Lstat(path.Dir(location))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(original, current) {
+		return execution.ErrBindingMismatch
+	}
+	// Remove only an empty, still-identical shell. Unexpected entries cannot be
+	// silently swept merely because required child categories were removed.
+	return root.Remove(path.Dir(location))
 }
 
 func restoreStagingName(name string) bool {

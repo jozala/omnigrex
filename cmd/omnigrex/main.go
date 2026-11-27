@@ -261,7 +261,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	workspaces, err := workspace.New(workspace.Options{
 		WorkspaceRoot: settings.WorkspaceRoot, PublicationRoot: settings.WorkspaceRoot, MiseRoot: settings.MiseRoot,
 		CaptureRoot: settings.WorkspaceCaptureRoot, CaptureSource: backend.Workspaces,
-		CaptureLedger: database,
+		CaptureLedger: database, StorageWriter: database.WithParticipantStorageWriter,
 	})
 	if err != nil {
 		return fmt.Errorf("configure Assignment workspaces: %w", err)
@@ -519,7 +519,7 @@ func run(ctx context.Context, settings config.Config, logger *slog.Logger) error
 	if err != nil {
 		return fmt.Errorf("configure Workflow closure settlement Worker: %w", err)
 	}
-	retentionWorker, err := retention.NewWorker(database, retention.NewToolPathCleaner(retention.StateCleaner{Source: database, States: retainedState}, workspaces), retention.WorkerConfig{
+	retentionWorker, err := retention.NewWorker(database, retention.NewStorageCleaner(workspaces, retention.NewToolPathCleaner(retention.StateCleaner{Source: database, States: retainedState}, workspaces)), retention.WorkerConfig{
 		ClaimOwner:    githubServices.claimOwner + ":collect-retained-assignments",
 		LeaseDuration: settings.WorkflowEffectLeaseDuration, HeartbeatInterval: settings.WorkflowEffectHeartbeatInterval,
 		IdlePollInterval: settings.WorkflowEffectPollInterval, RetryDelay: settings.WorkflowEffectRetryDelay,

@@ -369,3 +369,42 @@ func removeStorageTree(ctx context.Context, parent *os.File, name string, depth 
 	*bytes += original.Blocks * 512
 	return nil
 }
+
+// RemoveRetainedStorageTree is the backend retained-state collection primitive.
+// The caller must validate its exact state binding and hold collection exclusion.
+// Only categories whose existing contract permits a root link may unlink it;
+// no link target is traversed. Docker may additionally confirm daemon absence.
+func RemoveRetainedStorageTree(ctx context.Context, path string, allowRootLink bool) error {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	parent, err := openStorageRoot(filepath.Dir(path))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	name := filepath.Base(path)
+	var stat unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT == unix.S_IFLNK && allowRootLink {
+		if int(stat.Uid) != os.Geteuid() {
+			return ErrUnsafeAssignmentPath
+		}
+		if err := storageLeafSameMount(parent, name); err != nil {
+			return err
+		}
+		return unix.Unlinkat(int(parent.Fd()), name, 0)
+	}
+	budget := 8192
+	var bytes int64
+	return removeStorageTree(ctx, parent, name, 0, &budget, &bytes)
+}

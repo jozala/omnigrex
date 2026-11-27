@@ -223,9 +223,16 @@ func TestRetainedStateCollectionKeepsNeighborProtectedAndReadinessAvailable(t *t
 	}
 	// Compose the real runtime and filesystem collectors. A late category failure
 	// after Session deletion leaves durable collection incomplete; retry can resume.
-	paths, err := workspace.New(workspace.Options{WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "tools")})
+	paths, err := workspace.New(workspace.Options{WorkspaceRoot: filepath.Join(root, "workspace"), PublicationRoot: filepath.Join(root, "publication"), MiseRoot: filepath.Join(root, "tools"), StorageWriter: database.WithParticipantStorageWriter})
 	if err != nil {
 		t.Fatal(err)
+	}
+	called := false
+	if err := paths.WithParticipantStorageWriter(ctx, fixture.assignmentID, func(context.Context) error { called = true; return nil }); !errors.Is(err, execution.ErrConflict) || called {
+		t.Fatalf("COLLECTING writer admitted: %v %v", called, err)
+	}
+	if err := paths.WithParticipantStorageWriter(ctx, neighbor.assignmentID, func(context.Context) error { return database.Ready(ctx) }); err != nil {
+		t.Fatalf("neighbor writer/pool unavailable: %v", err)
 	}
 	participantPaths, err := paths.Paths(fixture.assignmentID)
 	if err != nil {
@@ -249,7 +256,7 @@ func TestRetainedStateCollectionKeepsNeighborProtectedAndReadinessAvailable(t *t
 	if err := os.Symlink(neighborPaths.Mise, participantPaths.Mise); err != nil {
 		t.Fatal(err)
 	}
-	cleaner := retention.NewToolPathCleaner(retention.StateCleaner{Source: database, States: states}, paths)
+	cleaner := retention.NewStorageCleaner(paths, retention.NewToolPathCleaner(retention.StateCleaner{Source: database, States: states}, paths))
 	if err := cleaner.CollectParticipant(ctx, fixture.assignmentID); err == nil {
 		t.Fatal("unsafe tools allowed completion")
 	}
