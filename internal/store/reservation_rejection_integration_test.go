@@ -254,7 +254,7 @@ func TestRecoveryDiagnosticsCountSelectedSuccessfulEffectsSeparately(t *testing.
 			if _, err := database.StartMutation(ctx, lease, mutation.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := database.RequestClarification(ctx, lease, mutation.ID, nil); err != nil {
+			if _, err := database.RequestClarification(ctx, lease, mutation.ID, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := database.CompleteMutation(ctx, lease, mutation.ID, json.RawMessage(`{"outcome":"CLARIFICATION_WAIT","round_id":""}`)); err != nil {

@@ -33,7 +33,7 @@ func TestClarificationDurableWaitAndInputFences(t *testing.T) {
 			if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
 				t.Fatal(err)
 			}
-			round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}})
+			round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -242,7 +242,7 @@ func TestKnownFailedQuestionPublicationDoesNotStrandClarificationRecovery(t *tes
 		if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
 			t.Fatal(err)
 		}
-		round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility policy?"}})
+		round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility policy?"}}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -803,6 +803,21 @@ func (reconciler *ProductionReconciler) reconcileClarification(ctx context.Conte
 	if json.Unmarshal(mutation.Request, &args) != nil {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
+	if ledger, ok := reconciler.clarifications.(interface {
+		GetRequestRejection(context.Context, string, string, string, int64, string) (*collaboration.RequestValidationError, error)
+	}); ok {
+		rejection, err := ledger.GetRequestRejection(ctx, scope.WorkflowID, scope.Turn.AgentParticipantID, mutation.AgentTurnID, mutation.ExecutionEpoch, mutation.ID)
+		if err != nil {
+			return unresolvedReconciliation(), err
+		}
+		if rejection != nil {
+			raw, err := collaboration.RequestRejectionResult(rejection)
+			if err != nil {
+				return unresolvedReconciliation(), err
+			}
+			return foundReconciliation(raw), nil
+		}
+	}
 	if len(args.Questions) == 0 {
 		pending, err := reconciler.clarifications.HasPendingHumanInput(ctx, scope.WorkflowID, scope.Turn.AgentParticipantID)
 		if err != nil {

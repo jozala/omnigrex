@@ -25,12 +25,22 @@ func (f *clarificationLedger) HasPendingHumanInput(context.Context, string, stri
 type clarificationLedger struct {
 	resolutionOperation string
 	round               collaboration.Round
+	limit               int
 	published           bool
 	source              collaboration.Source
 }
 
-func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question) (collaboration.Round, error) {
-	f.round = collaboration.Round{Reference: "R1", ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, ID: "R" + id, Questions: questions}
+func (f *clarificationLedger) RequestClarification(_ context.Context, _ store.AgentTurnLease, id string, questions []collaboration.Question, preflight func(collaboration.Round) error) (collaboration.Round, error) {
+	if f.limit > 0 && len(questions) > f.limit {
+		return collaboration.Round{}, &collaboration.RequestValidationError{Code: "question_limit_exceeded"}
+	}
+	round := collaboration.Round{Reference: "R1", ParticipantID: reconciliationContext().Turn.AgentParticipantID, TurnID: reconciliationContext().Turn.ID, ID: "R" + id, Questions: questions}
+	if preflight != nil {
+		if err := preflight(round); err != nil {
+			return collaboration.Round{}, err
+		}
+	}
+	f.round = round
 	return f.round, nil
 }
 func (f *clarificationLedger) ConfirmClarificationPublication(_ context.Context, _, id string, source collaboration.Source) error {
@@ -291,7 +301,7 @@ func TestPlannerQuestionRoundsAreBoundedBeforePublication(t *testing.T) {
 	}
 	for _, count := range []int{1, 5, 6} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			ledger := &clarificationLedger{}
+			ledger := &clarificationLedger{limit: 5}
 			api := &backendGitHub{}
 			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: &backendCredentials{developer: "developer-secret"}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger, Policies: policies})
 			if err != nil {
@@ -305,9 +315,9 @@ func TestPlannerQuestionRoundsAreBoundedBeforePublication(t *testing.T) {
 			scope := productionToolScope(role.Planner)
 			scope.PullRequest = nil
 			scope.AgentProfileName, scope.RoleDisplayName = "planner", "Planner"
-			_, err = backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolRequestClarification, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: args})
+			result, err := backend.Execute(context.Background(), mcp.Invocation{Name: mcp.ToolRequestClarification, Class: mcp.MutationTool, Scope: scope, OperationID: reconciliationMutationID, Arguments: args})
 			if count > 5 {
-				if !errors.Is(err, mcp.ErrInvalidInvocation) || ledger.round.ID != "" || ledger.published {
+				if err != nil || !collaboration.IsRequestRejection(result) || ledger.round.ID != "" || ledger.published {
 					t.Fatalf("oversized round admitted: %+v %v", ledger, err)
 				}
 			} else if err != nil || !ledger.published {
@@ -414,5 +424,45 @@ func TestResolutionRecoveryUsesExactDurableRejectionNotHistoryAbsence(t *testing
 	result, err = reconciler.Reconcile(context.Background(), scope, mutation)
 	if err != nil || result.Disposition != mcp.ReconciliationUnresolved {
 		t.Fatal("absence converted to rejection", result, err)
+	}
+}
+
+type rejectingRequestLedger struct {
+	clarificationLedger
+	err error
+}
+
+func (f *rejectingRequestLedger) RequestClarification(context.Context, store.AgentTurnLease, string, []collaboration.Question, func(collaboration.Round) error) (collaboration.Round, error) {
+	return collaboration.Round{}, f.err
+}
+
+func TestRequestGatewayKeepsUnknownErrorsMasked(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	ledger := &rejectingRequestLedger{}
+	backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &backendGitHub{}, Credentials: &backendCredentials{}, Publisher: &backendPublisher{}, Workflow: mcp.LedgerWorkflowMutations{}, Clarifications: ledger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := &fakeStore{}
+	gateway := newTestGateway(t, now, durable, backend)
+	scope := validScope(now)
+	scope.HeadSHA = productionHeadSHA
+	registration, err := gateway.Register(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialize(t, gateway, registration)
+	for i, cause := range []error{errors.New("dependency credential-secret"), mcp.OutcomeUnknown(&collaboration.RequestValidationError{Code: "duplicate_question", QuestionIndex: 2})} {
+		ledger.err = cause
+		response := httptest.NewRecorder()
+		gateway.ServeHTTP(response, rpcRequest(t, registration, mcp.ProtocolVersion, fmt.Sprintf(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"request_clarification","arguments":{"operation_id":"unknown-%d","questions":[{"id":"Q1","body":"Private body?"}]}}}`, i)))
+		body := response.Body.String()
+		if !strings.Contains(body, `"isError":true`) || strings.Contains(body, "credential-secret") || strings.Contains(body, "not_applied") {
+			t.Fatal(body)
+		}
+	}
+	_, _, completed, failed, unknown := durable.mutationCounts()
+	if completed != 0 || failed != 0 || unknown != 2 {
+		t.Fatal(completed, failed, unknown)
 	}
 }

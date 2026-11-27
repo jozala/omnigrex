@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -46,8 +47,11 @@ func saveCollaborationTx(ctx context.Context, tx pgx.Tx, workflowID string, stat
 
 // RequestClarification reserves domain identities before any human-visible effect.
 // Its exact live Turn fence and operation ledger make retry after a lost response safe.
-func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, operation string, questions []collaboration.Question) (collaboration.Round, error) {
+// preflight must be side-effect-free. It runs after authoritative validation on
+// the complete round, but before saving identities/references or committing.
+func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, operation string, questions []collaboration.Question, preflight func(collaboration.Round) error) (collaboration.Round, error) {
 	var round collaboration.Round
+	var rejection *collaboration.RequestValidationError
 	err := s.withLockedAgentTurnLease(ctx, lease, "reserve clarification", func(tx pgx.Tx, turn lockedTurn) error {
 		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
 			return ErrMutationAdmissionClosed
@@ -61,8 +65,23 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 		if err != nil {
 			return err
 		}
-		if len(questions) == 0 && (state.Pending(turn.AgentParticipantID) || state.AwaitingPlanConfirmation(turn.AgentParticipantID)) {
-			return nil
+		var intent struct {
+			Questions []collaboration.Question `json:"questions"`
+		}
+		if err = json.Unmarshal(request, &intent); err != nil {
+			return err
+		}
+		// Nil and empty Go slices represent the same empty request; compare
+		// exact entries, not slice allocation. Bodies and order remain exact.
+		if !slices.Equal(intent.Questions, questions) {
+			return ErrMutationOperationConflict
+		}
+		for _, prior := range state.RequestRejections {
+			if prior.OperationID == operation && prior.ParticipantID == turn.AgentParticipantID && prior.TurnID == turn.ID && prior.ExecutionEpoch == turn.ExecutionEpoch {
+				copy := prior.Validation
+				rejection = &copy
+				return nil
+			}
 		}
 		id := "R" + mutationID
 		for _, r := range state.Rounds {
@@ -87,15 +106,38 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 				}
 			}
 		}
+		unsettled := false
+		for _, prior := range state.Rounds {
+			if !prior.Published && !prior.PublicationFailed {
+				unsettled = true
+			}
+		}
+		if !unsettled && len(questions) == 0 && (state.Pending(turn.AgentParticipantID) || state.AwaitingPlanConfirmation(turn.AgentParticipantID)) {
+			return nil
+		}
 		var args struct {
 			Introduction string `json:"introduction"`
 		}
 		if err = json.Unmarshal(request, &args); err != nil {
 			return err
 		}
-		round, err = state.Request(id, turn.AgentParticipantID, turn.ID, head, questions)
-		if err != nil {
+		var participantRole workflow.Role
+		if err = tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id=$1`, turn.AgentParticipantID).Scan(&participantRole); err != nil {
 			return err
+		}
+		if unsettled {
+			err = &collaboration.RequestValidationError{Code: "earlier_publication_unsettled"}
+		} else if len(questions) > 50 || participantRole == workflow.RolePlanner && len(questions) > 5 {
+			err = &collaboration.RequestValidationError{Code: "question_limit_exceeded"}
+		} else {
+			round, err = state.Request(id, turn.AgentParticipantID, turn.ID, head, questions)
+		}
+		if err != nil {
+			if !errors.As(err, &rejection) {
+				return err
+			}
+			state.RequestRejections = append(state.RequestRejections, collaboration.RequestRejection{OperationID: operation, ParticipantID: turn.AgentParticipantID, TurnID: turn.ID, ExecutionEpoch: turn.ExecutionEpoch, Validation: *rejection})
+			return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
 		}
 		for i := range state.Rounds {
 			if state.Rounds[i].ID == round.ID {
@@ -103,9 +145,43 @@ func (s *Store) RequestClarification(ctx context.Context, lease AgentTurnLease, 
 				round = state.Rounds[i]
 			}
 		}
+		if preflight != nil {
+			if err = preflight(round); err != nil {
+				return err
+			}
+		}
 		return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
 	})
-	return round, err
+	// Never turn an ambiguous transaction acknowledgment into definite rejection.
+	if err != nil {
+		return collaboration.Round{}, err
+	}
+	if rejection != nil {
+		return collaboration.Round{}, rejection
+	}
+	return round, nil
+}
+
+// GetRequestRejection reads committed, exact-operation non-publication evidence.
+func (s *Store) GetRequestRejection(ctx context.Context, workflowID, participant, turn string, epoch int64, operation string) (*collaboration.RequestValidationError, error) {
+	var raw []byte
+	if err := s.pool.QueryRow(ctx, `SELECT state FROM work_item_collaboration WHERE workflow_id=$1`, workflowID).Scan(&raw); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var state collaboration.State
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil, err
+	}
+	for _, r := range state.RequestRejections {
+		if r.OperationID == operation && r.ParticipantID == participant && r.TurnID == turn && r.ExecutionEpoch == epoch {
+			copy := r.Validation
+			return &copy, nil
+		}
+	}
+	return nil, nil
 }
 
 // ConfirmClarificationPublication is called only after the adapter has verified

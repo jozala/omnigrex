@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jozala/omnigrex/internal/agentturn"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	githubapi "github.com/jozala/omnigrex/internal/github"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/store"
@@ -1641,6 +1642,21 @@ func TestRetryTurnExposesOnlyItsSuccessfulAncestorTerminalIntent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	fixture, original, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 978, workflow.RoleDeveloper, "")
+	qs := []collaboration.Question{{ID: "duplicate", Body: "First?"}, {ID: "duplicate", Body: "Second?"}}
+	rejected := startQuestionRequest(t, database, ctx, original, "rejected-question", qs)
+	_, rejectionErr := database.RequestClarification(ctx, original, rejected.ID, qs, nil)
+	var validation *collaboration.RequestValidationError
+	if !errors.As(rejectionErr, &validation) {
+		t.Fatal(rejectionErr)
+	}
+	rawRejection, rejectionErr := collaboration.RequestRejectionResult(validation)
+	if rejectionErr != nil {
+		t.Fatal(rejectionErr)
+	}
+	if rejectionErr = database.CompleteMutation(ctx, original, rejected.ID, rawRejection); rejectionErr != nil {
+		t.Fatal(rejectionErr)
+	}
+
 	mutation, err := database.ReserveMutation(ctx, original, store.MutationSpec{
 		OperationID: "prior-ready", ToolName: "request_review",
 		Request:         json.RawMessage(`{"operation_id":"prior-ready","summary":"Ready"}`),
@@ -1686,6 +1702,30 @@ WHERE id = $1 AND status = 'AVAILABLE'`, settled.SuccessorJobID); err != nil {
 	execution, err := database.GetAgentTurnExecutionContext(ctx, retryLease)
 	if err != nil || execution.PriorTerminalIntent == nil || execution.PriorTerminalIntent.SourceInvocationID != mutation.ID {
 		t.Fatalf("prior intent notice = (%#v, %v)", execution.PriorTerminalIntent, err)
+	}
+	// SQL ancestor selectors must agree with strict Go recognition. A malformed
+	// SUCCEEDED clarification remains terminal evidence and blocks sole-source
+	// selection instead of disappearing merely because it lacks waiting.
+	for _, bad := range []string{
+		`{}`,
+		strings.Replace(string(rawRejection), `"question_index":2`, `"question_index":"2"`, 1),
+		strings.Replace(string(rawRejection), `"question_index":2`, `"question_index":null`, 1),
+		strings.Replace(string(rawRejection), `"duplicate_question"`, `"unknown_reason"`, 1),
+		string(rawRejection[:len(rawRejection)-1]) + `,"outcome":"CLARIFICATION_WAIT"}`,
+	} {
+		if _, err := pool.Exec(ctx, `UPDATE tool_invocations SET result=$2 WHERE id=$1`, rejected.ID, []byte(bad)); err != nil {
+			t.Fatal(err)
+		}
+		current, err := database.GetAgentTurnExecutionContext(ctx, retryLease)
+		if err != nil || current.PriorTerminalIntent != nil {
+			t.Fatal("malformed rejection hidden in prior discovery", current.PriorTerminalIntent, err)
+		}
+		if _, err = database.GetConfirmablePriorTerminalIntent(ctx, retryLease, mutation.ID); !errors.Is(err, store.ErrMutationOperationConflict) {
+			t.Fatal("malformed rejection hidden in ancestor count", err)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tool_invocations SET result=$2 WHERE id=$1`, rejected.ID, []byte(rawRejection)); err != nil {
+		t.Fatal(err)
 	}
 	source, err := database.GetConfirmablePriorTerminalIntent(ctx, retryLease, mutation.ID)
 	if err != nil || source.ID != mutation.ID || source.ToolName != "request_review" {

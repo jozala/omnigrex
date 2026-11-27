@@ -1494,3 +1494,57 @@ func TestPRReadAbsenceIsNotAReadFailure(t *testing.T) {
 		t.Fatal("absence performed external lookup")
 	}
 }
+
+func TestProductionBackendReplaysOnlyDefiniteRequestRejectionAcrossHeads(t *testing.T) {
+	const rejected = `{"status":"rejected","publication":"not_applied","reason":"duplicate_question","question_index":2,"next_action":"correct_arguments_new_operation"}`
+	for _, tc := range []struct {
+		name, result string
+		invalidate   func(*mcp.Invocation, *store.MutationReservation)
+	}{
+		{name: "recognized", result: rejected},
+		{name: "genuine waiting", result: `{"outcome":"CLARIFICATION_WAIT","round_id":"R1"}`},
+		{name: "mixed waiting evidence", result: `{"status":"rejected","publication":"not_applied","reason":"duplicate_question","question_index":2,"next_action":"correct_arguments_new_operation","outcome":"CLARIFICATION_WAIT"}`},
+		{name: "missing position", result: `{"status":"rejected","publication":"not_applied","reason":"duplicate_question","next_action":"correct_arguments_new_operation"}`},
+		{name: "changed arguments", result: rejected, invalidate: func(inv *mcp.Invocation, _ *store.MutationReservation) {
+			inv.Arguments = canonicalTestJSON(json.RawMessage(`{"operation_id":"rejected-question","questions":[{"id":"Q1","body":"Changed?"}]}`))
+		}},
+		{name: "same turn", result: rejected, invalidate: func(inv *mcp.Invocation, source *store.MutationReservation) {
+			source.AgentTurnID = inv.Scope.AgentTurnID
+		}},
+		{name: "unsettled mutation", result: rejected, invalidate: func(_ *mcp.Invocation, source *store.MutationReservation) { source.State = store.MutationUnknown }},
+		{name: "wrong workflow resource", result: rejected, invalidate: func(inv *mcp.Invocation, source *store.MutationReservation) {
+			source.ExternalResourceID = "other-workflow"
+			inv.Mutation.ExternalResourceID = "other-workflow"
+		}},
+		{name: "altered recorded head", result: rejected, invalidate: func(inv *mcp.Invocation, _ *store.MutationReservation) { inv.Mutation.ExpectedSHA = inv.Scope.HeadSHA }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, publisher := &backendGitHub{}, &backendPublisher{}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: api, Credentials: &backendCredentials{}, Publisher: publisher, Workflow: &backendWorkflow{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := productionToolScope(workflow.RoleDeveloper)
+			scope.HeadSHA = strings.Repeat("b", 40)
+			source := replayMutation("54000000-0000-4000-8000-000000000001", mcp.ToolRequestClarification, `{"operation_id":"rejected-question","questions":[{"id":"Q1","body":"One?"},{"id":"Q1","body":"Two?"}]}`, "omnigrex", scope.WorkflowID, productionHeadSHA, tc.result)
+			inv := replayInvocation(scope, source)
+			if tc.invalidate != nil {
+				tc.invalidate(&inv, &source)
+			}
+			err = backend.RestoreMutationReplay(t.Context(), inv, source)
+			if (err == nil) != (tc.name == "recognized") {
+				t.Fatalf("RestoreMutationReplay error = %v", err)
+			}
+			assertProductionBackendStateSizes(t, backend, 0, 0, 0, 0)
+			if len(api.calls) != 0 || len(publisher.publications) != 0 {
+				t.Fatal("rejection replay performed external work")
+			}
+			// No historical publication/head progress is restored: a new operation
+			// continues to plan against this checkout, never the ancestor's head.
+			plan, err := backend.PlanMutation(t.Context(), mcp.Invocation{Name: mcp.ToolPublishChanges, Class: mcp.MutationTool, OperationID: "next", Arguments: json.RawMessage(`{"operation_id":"next"}`), Scope: scope})
+			if err != nil || plan.ExpectedSHA != scope.HeadSHA {
+				t.Fatal(plan, err)
+			}
+		})
+	}
+}

@@ -38,7 +38,7 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 				if _, err = database.StartMutation(ctx, lease, mutation.ID); err != nil {
 					t.Fatal(err)
 				}
-				round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}})
+				round, err := database.RequestClarification(ctx, lease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}}, nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -358,7 +358,7 @@ func TestHumanInputPresentationRacesRetainContinuation(t *testing.T) {
 					if _, err = database.StartMutation(ctx, nextLease, mutation.ID); err != nil {
 						t.Fatal(err)
 					}
-					nextRound, err := database.RequestClarification(ctx, nextLease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}, {ID: "Q3", Body: "Retention choice?"}})
+					nextRound, err := database.RequestClarification(ctx, nextLease, mutation.ID, []collaboration.Question{{ID: "Q1", Body: "Compatibility?"}, {ID: "Q2", Body: "Retention?"}, {ID: "Q3", Body: "Retention choice?"}}, nil)
 					if err != nil {
 						t.Fatal(err)
 					}

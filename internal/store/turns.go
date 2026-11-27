@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
@@ -1072,7 +1073,8 @@ WHERE source.workflow_attempt_id = $2 AND source.agent_session_id = $3
 	                  ELSE terminal.id::text END) FROM ancestors AS prior_turn
        JOIN tool_invocations AS terminal ON terminal.agent_turn_id = prior_turn.id
        WHERE terminal.kind = 'MUTATION' AND terminal.state = 'SUCCEEDED'
-         AND terminal.tool_name IN ('complete_planning', 'request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')) = 1
+         AND terminal.tool_name IN ('complete_planning', 'request_clarification', 'request_review', 'submit_review', 'report_blocked', 'confirm_prior_terminal_intent')
+ AND NOT (terminal.tool_name='request_clarification' AND `+clarificationRejectionSQL("terminal.result")+`)) = 1
   AND EXISTS (SELECT 1 FROM agent_turn_settlements AS settlement
               WHERE settlement.agent_turn_id = source.id
                 AND settlement.workflow_outcome = 'INFRASTRUCTURE_FAILED')
@@ -1180,6 +1182,7 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 		return MutationReservation{}, fmt.Errorf("reserve mutation: %w", err)
 	}
 	var reservation MutationReservation
+	var requestRejection *collaboration.RequestValidationError
 	err = store.withLockedAgentTurnLease(ctx, lease, "reserve mutation", func(tx pgx.Tx, turn lockedTurn) error {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || $3, 0))`, turn.operationLineageID, spec.ToolName, spec.OperationID); err != nil {
 			return err
@@ -1206,6 +1209,40 @@ func (store *Store) ReserveMutation(ctx context.Context, lease AgentTurnLease, s
 		}
 		if !turn.MutationAdmissionOpen || turn.Status != AgentTurnRunning {
 			return &MutationReservationRejection{Cause: ErrMutationAdmissionClosed}
+		}
+		// Count-only mistakes have no possible effect before reservation. Prove
+		// this under admission authority rather than allocating a fake mutation.
+		if spec.ToolName == "request_clarification" {
+			var args struct {
+				Questions []collaboration.Question `json:"questions"`
+			}
+			if err := json.Unmarshal(request, &args); err != nil {
+				return &MutationReservationRejection{Cause: err}
+			}
+			state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
+			if err != nil {
+				return err
+			}
+			fingerprint := fmt.Sprintf("%x", sha256.Sum256(WithoutReservationSignature(spec.ToolName, request)))
+			for _, prior := range state.RequestAdmissionRejections {
+				if prior.OperationID == spec.OperationID && prior.OperationLineageID == turn.operationLineageID && prior.ParticipantID == turn.AgentParticipantID {
+					if prior.RequestSHA256 != fingerprint {
+						return &MutationReservationRejection{Cause: ErrMutationOperationConflict}
+					}
+					copy := prior.Validation
+					requestRejection = &copy
+					return nil
+				}
+			}
+			var participantRole workflow.Role
+			if err := tx.QueryRow(ctx, `SELECT role FROM agent_participants WHERE id=$1`, turn.AgentParticipantID).Scan(&participantRole); err != nil {
+				return err
+			}
+			if len(args.Questions) > 50 || participantRole == workflow.RolePlanner && len(args.Questions) > 5 {
+				requestRejection = &collaboration.RequestValidationError{Code: "question_limit_exceeded"}
+				state.RequestAdmissionRejections = append(state.RequestAdmissionRejections, collaboration.RequestAdmissionRejection{OperationID: spec.OperationID, OperationLineageID: turn.operationLineageID, ParticipantID: turn.AgentParticipantID, RequestSHA256: fingerprint, Validation: *requestRejection})
+				return saveCollaborationTx(ctx, tx, lease.JobLease.WorkflowID, state)
+			}
 		}
 		if spec.ToolName == "complete_planning" || spec.ToolName == "request_review" || spec.ToolName == "submit_review" || spec.ToolName == "confirm_prior_terminal_intent" {
 			state, err := readCollaborationTx(ctx, tx, lease.JobLease.WorkflowID)
@@ -1244,7 +1281,14 @@ RETURNING admitted_at`, invocationID, lease.ID, lease.ExecutionEpoch, turn.opera
 			spec.OperationID, spec.Request, nullableString(spec.ExternalService),
 			nullableString(spec.ExternalResourceID), nullableString(spec.ExpectedSHA), reservation.HistoryPublication).Scan(&reservation.AdmittedAt)
 	})
-	return reservation, err
+	if err != nil {
+		return MutationReservation{}, err
+	}
+	// A failed/ambiguous receipt commit must not carry non-admission proof.
+	if requestRejection != nil {
+		return MutationReservation{}, &MutationReservationRejection{Cause: requestRejection}
+	}
+	return reservation, nil
 }
 
 // AcknowledgeMutationReplay projects one validated ancestor result into the current turn ledger.
@@ -2206,7 +2250,7 @@ SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $2)`, turnID, sourceTurnID).Sc
 }
 
 func rejectIneligibleTerminalReplay(ctx context.Context, tx pgx.Tx, source MutationReservation) error {
-	if source.State != MutationSucceeded {
+	if source.State != MutationSucceeded || source.ToolName == "request_clarification" && collaboration.IsRequestRejection(source.Result) {
 		return nil
 	}
 	switch source.ToolName {

@@ -456,6 +456,9 @@ WHERE id = $1 AND kind = 'MUTATION' AND state = 'SUCCEEDED'
 		}
 		return ErrTerminalCorroborationConflict
 	}
+	if tool == "request_clarification" && collaboration.IsRequestRejection(result) {
+		return ErrTerminalCorroborationConflict
+	}
 	if tool == "request_clarification" {
 		if operation == "" || (service != "github" && service != "omnigrex") || observation.Outcome != workflow.TurnOutcomeClarificationWait {
 			return ErrTerminalCorroborationConflict

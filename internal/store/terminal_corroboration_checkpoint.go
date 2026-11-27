@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jozala/omnigrex/internal/collaboration"
 	"github.com/jozala/omnigrex/internal/workflow"
 )
 
@@ -38,7 +39,7 @@ FROM agent_turns WHERE id = $1 AND execution_epoch = $2`, turnID, epoch).Scan(&e
 			rows.Close()
 			return "", false, err
 		}
-		if mutation.State != MutationSucceeded {
+		if mutation.State != MutationSucceeded || mutation.ToolName == "request_clarification" && collaboration.IsRequestRejection(mutation.Result) {
 			continue
 		}
 		switch mutation.ToolName {

@@ -91,7 +91,22 @@ try {
         add('omnigrex_request_clarification',{operation_id:'planning-ask-2',questions:[{id:'Q2',body:'Retain onboarding status? I recommend persistence.'}]});
       }else if(rounds.length===2){
         resolve('reaffirm-audience',rounds[0],[resolution('Q1',decisions.map(i=>i.id),'Audience remains small teams without accounts after the correction. Selection still needs explicit reconciliation.')]);
-        add('omnigrex_request_clarification',{operation_id:'planning-ask-3',questions:[{id:'Q2-v2',replaces:'Q2',body:'Use ephemeral local status with no retained personal data instead?'}]});
+        const countRejected=calls.length;
+        const tooMany={operation_id:'planning-too-many-questions',questions:Array.from({length:6},(_,i)=>({id:`extra-${i}`,body:'Which boundary?'}))};
+        add('omnigrex_request_clarification',tooMany);add('omnigrex_request_clarification',tooMany);
+        calls.push(()=>{
+          const a=get(countRejected),b=get(countRejected+1);
+          if(a.status!=='rejected'||a.publication!=='not_applied'||a.reason!=='question_limit_exceeded'||a.question_index!==0||!isDeepStrictEqual(a,b))throw new Error('count rejection intercepted by Pi schema instead of authoritative admission');
+          return {name:'bash',args:{command:'true'}};
+        });
+        const rejected=calls.length;
+        const invalid={operation_id:'planning-reword-immutable',introduction:'Ephemeral means the status disappears on exit; for example, no saved onboarding records.',questions:[{id:'Q2',body:'Use ephemeral local status with no retained personal data instead?'}]};
+        add('omnigrex_request_clarification',invalid);add('omnigrex_request_clarification',invalid);
+        calls.push(()=>{
+          const a=get(rejected),b=get(rejected+1);
+          if(a.status!=='rejected'||a.publication!=='not_applied'||a.reason!=='question_identity_content_changed'||a.question_index!==1||a.next_action!=='correct_arguments_new_operation'||a.outcome||a.round_id||a.reference||!isDeepStrictEqual(a,b))throw new Error('request rejection masked by pinned Pi or counted as waiting');
+          return {name:'omnigrex_request_clarification',args:{operation_id:'planning-ask-3',introduction:invalid.introduction,questions:[{id:'Q2-v2',replaces:'Q2',body:invalid.questions[0].body}]}};
+        });
       }else{
         if(amended){
           resolve('reinterpret-audience',rounds[0],[resolution('Q1',input.map(i=>i.id),'The amendment replaces the audience: users without repository access. Use the standalone operator CLI from steering.')]);

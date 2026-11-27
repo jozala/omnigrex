@@ -62,6 +62,21 @@ For Planner, set `invalidate_confirmation` when recognizing withdrawal, unresolv
 These reference, correction, assessment and conflict safeguards apply to Planner, Developer and Reviewer.
 Developer and Reviewer retain their own responsibilities, question limits and outcomes: they do not acquire Planner documents, plan confirmation, checkpoint cadence or a five-question limit.
 
+## Clarification request rejection recovery
+
+Inspect every `request_clarification` result before ending the Turn.
+`status: rejected` with `publication: not_applied` is definite non-application of this request, not terminal intent or `CLARIFICATION_WAIT`.
+For `next_action: correct_arguments_new_operation`, correct the internal request under a fresh operation identity and continue within existing Turn limits.
+Question bodies are exactly immutable under their IDs: keep the original body and explain it in `introduction`, or use a new ID with `replaces` naming the old question.
+Carry unresolved questions forward, remove duplicate IDs, respect the applicable count limit, and use empty questions only for pending delivery or exact-plan confirmation.
+Use structural `reason` and one-based `question_index` feedback; zero means no submitted position applies.
+Identical-operation replay returns the recorded rejection even after state changes; corrected content cannot reuse that identity.
+For `earlier_publication_unsettled` / `reconcile_prior_operation`, this request was not applied but the earlier publication is still uncertain: reconcile its exact operation, never bypass it with a fresh request.
+Keep Human Handoff when existing recovery cannot establish that earlier outcome.
+Unknown effects or ambiguous commits still require exact-operation recovery; absent history alone is not non-publication proof.
+Do not ask for a repeated sufficient human answer, technical recovery approval, or publish per-attempt error comments for a correctable internal mistake.
+Genuine product uncertainty still requires a substantive clarification question; if correction cannot succeed, explain the actual blocker rather than calling a proven rejection uncertain publication.
+
 ## Clarification resolution evidence and rejection recovery
 
 Cite delivered evidence scoped to each exact question and Participant through its round or an explicitly permitted correction/evidence relationship.

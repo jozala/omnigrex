@@ -112,3 +112,6 @@ Do not copy an existing ADR into a second record.
 - [0068: Qualify Reviewer admission and bound CI repair](0068-qualify-review-admission-and-bound-ci-repair.md) - Accepted, 2026-11-15.
 
 - [0069: Project human-input waiting independently of Stage](0069-project-human-input-waiting-independently.md) - Accepted, 2026-11-19.
+
+- [0070: Distinguish handled request rejection from terminal intent](0070-distinguish-handled-request-rejection-from-terminal-intent.md) - Accepted, 2026-11-19.
+
