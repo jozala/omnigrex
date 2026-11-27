@@ -45,6 +45,8 @@ type WorkflowGitHubEffectContext struct {
 	ReadyForSHA                    string
 	HandoffReason                  string
 	HandoffDiagnostic              string
+	HandoffContext                 *workflow.HandoffContext
+	HandoffSourceHeadSHA           string
 	SafetyDiagnostic               bool
 	ChangeProposal                 *WorkflowGitHubChangeProposal
 	CleanupRequired                bool
@@ -70,12 +72,14 @@ type WorkflowGitHubEffectAcknowledgement struct {
 }
 
 type workflowGitHubEffectPayload struct {
-	HumanInputOnly    bool   `json:"human_input_only,omitempty"`
-	Revision          int64  `json:"revision"`
-	PullRequestNumber int64  `json:"pull_request_number"`
-	Reason            string `json:"reason,omitempty"`
-	Diagnostic        string `json:"diagnostic,omitempty"`
-	SafetyDiagnostic  bool   `json:"safety_diagnostic,omitempty"`
+	Context           *workflow.HandoffContext `json:"context,omitempty"`
+	SourceHeadSHA     string                   `json:"source_head_sha,omitempty"`
+	HumanInputOnly    bool                     `json:"human_input_only,omitempty"`
+	Revision          int64                    `json:"revision"`
+	PullRequestNumber int64                    `json:"pull_request_number"`
+	Reason            string                   `json:"reason,omitempty"`
+	Diagnostic        string                   `json:"diagnostic,omitempty"`
+	SafetyDiagnostic  bool                     `json:"safety_diagnostic,omitempty"`
 }
 
 // ClaimWorkflowGitHubEffectJob leases one exact visible-effect kind while serializing claims per Workflow.
@@ -276,17 +280,27 @@ SELECT EXISTS (
 		effect.HandoffReason = payload.Reason
 		effect.HandoffDiagnostic = payload.Diagnostic
 	} else if effect.HandoffReason != "" {
+		var currentPayload []byte
 		err = tx.QueryRow(ctx, `
-SELECT COALESCE(payload->>'diagnostic', '')
+SELECT payload
 FROM jobs
 WHERE workflow_id = $1 AND kind = $2
   AND payload->>'revision' = $3
   AND payload->>'reason' = $4
   AND COALESCE((payload->>'safety_diagnostic')::boolean, false) = false
 ORDER BY created_at DESC, id DESC
-LIMIT 1`, job.WorkflowID, PublishHumanHandoffJobKind, fmt.Sprint(effect.Revision), effect.HandoffReason).Scan(&effect.HandoffDiagnostic)
+LIMIT 1`, job.WorkflowID, PublishHumanHandoffJobKind, fmt.Sprint(effect.Revision), effect.HandoffReason).Scan(&currentPayload)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return WorkflowGitHubEffectContext{}, fmt.Errorf("read current Human Handoff diagnostic: %w", err)
+		}
+		if err == nil {
+			var current workflowGitHubEffectPayload
+			if err := json.Unmarshal(currentPayload, &current); err != nil {
+				return effect, err
+			}
+			effect.HandoffDiagnostic = current.Diagnostic
+			effect.HandoffContext = current.Context
+			effect.HandoffSourceHeadSHA = current.SourceHeadSHA
 		}
 	}
 	var cleanupIssueNumber, cleanupPullRequestNumber int64

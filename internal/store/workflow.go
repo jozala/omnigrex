@@ -1137,25 +1137,32 @@ WHERE id = (SELECT agent_participant_id FROM jobs WHERE id = $1)
 			// Copy only the immediately preceding revision's normal handoff.
 			// Equal state/reason never authorizes an arbitrary historical diagnostic.
 			var reason string
-			var diagnostic string
+			var sourcePayload []byte
 			if err := tx.QueryRow(ctx, `
 SELECT COALESCE(workflow.human_handoff_reason, ''), COALESCE((
-    SELECT payload->>'diagnostic' FROM jobs
+    SELECT payload FROM jobs
     WHERE workflow_id = workflow.id AND kind = 'PUBLISH_HUMAN_HANDOFF'
       AND payload->>'revision' = $2
       AND payload->>'reason' = workflow.human_handoff_reason
       AND COALESCE((payload->>'safety_diagnostic')::boolean, false) = false
     ORDER BY created_at DESC, id DESC LIMIT 1
-), '')
-FROM workflows AS workflow WHERE id = $1`, workflowID, fmt.Sprint(action.SourceRevision)).Scan(&reason, &diagnostic); err != nil {
+), '{}'::jsonb)
+FROM workflows AS workflow WHERE id = $1`, workflowID, fmt.Sprint(action.SourceRevision)).Scan(&reason, &sourcePayload); err != nil {
 				return fmt.Errorf("preserve current Human Handoff publication: %w", err)
 			}
 			if reason == "" {
 				return ErrWorkflowDecisionInvalid
 			}
 			handoffPayload := map[string]any{
-				"reason": reason, "diagnostic": diagnostic, "revision": decision.Snapshot.Revision,
+				"reason": reason, "revision": decision.Snapshot.Revision,
 			}
+			var source workflowGitHubEffectPayload
+			if err := json.Unmarshal(sourcePayload, &source); err != nil {
+				return err
+			}
+			handoffPayload["diagnostic"] = source.Diagnostic
+			handoffPayload["context"] = source.Context
+			handoffPayload["source_head_sha"] = source.SourceHeadSHA
 			if decision.Snapshot.ChangeProposal != nil {
 				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number
 			}
@@ -1177,6 +1184,7 @@ WHERE workflow_id = $1 AND status <> 'SUPERSEDED' AND state_deleted_at IS NULL`,
 			}
 			handoffPayload := map[string]any{
 				"reason": action.Reason, "diagnostic": action.Diagnostic, "revision": decision.Snapshot.Revision,
+				"context": action.Context, "source_head_sha": action.SourceHeadSHA,
 			}
 			if decision.Snapshot.ChangeProposal != nil {
 				handoffPayload["pull_request_number"] = decision.Snapshot.ChangeProposal.Number

@@ -288,7 +288,11 @@ type TurnSettledEvent struct {
 	HumanInputPending          bool
 	PendingEvents              PendingEventsObservation
 	Diagnostic                 string
+	HandoffContext             *HandoffContext
 	CorroborationHandoffReason Reason
+	// HandoffSourceHeadSHA is presentation provenance derived from the exact
+	// publication ledger by the Store, never agent input or Turn authority.
+	HandoffSourceHeadSHA string
 }
 
 func (TurnSettledEvent) isWorkflowEvent() {}
@@ -535,8 +539,10 @@ func (PreserveHumanHandoffAction) isWorkflowAction() {}
 
 // MarkHumanHandoffAction records that autonomous progress has returned to a human.
 type MarkHumanHandoffAction struct {
-	Reason     Reason
-	Diagnostic string
+	Context       *HandoffContext
+	SourceHeadSHA string
+	Reason        Reason
+	Diagnostic    string
 }
 
 func (MarkHumanHandoffAction) isWorkflowAction() {}

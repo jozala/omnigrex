@@ -776,12 +776,19 @@ func reconcilePendingAction(sourceTurn TurnGuard, pending PendingEventsObservati
 }
 
 func reduceBlocked(next Snapshot, event TurnSettledEvent) Decision {
+	sourceHead := event.Turn.ExpectedHeadSHA
+	if event.PublicationAssociation != nil {
+		sourceHead = event.PublicationAssociation.HeadSHA
+	}
+	if event.HandoffSourceHeadSHA != "" {
+		sourceHead = event.HandoffSourceHeadSHA
+	}
 	next.State = StateNeedsHuman
 	next.ResumeRole = event.Turn.Role
 	next.Assignments.Status = AssignmentWaitingForHuman
 	next.Revision++
 	actions := []Action{
-		MarkHumanHandoffAction{Reason: ReasonAgentBlocked, Diagnostic: event.Diagnostic},
+		MarkHumanHandoffAction{Reason: ReasonAgentBlocked, Diagnostic: event.Diagnostic, Context: event.HandoffContext, SourceHeadSHA: sourceHead},
 		ReconcileLabelsAction{State: StateNeedsHuman},
 	}
 	if pendingRequiresReconciliation(event.PendingEvents) {

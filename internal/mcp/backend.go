@@ -76,10 +76,11 @@ type RequestReviewMutation struct {
 }
 
 type ReportBlockedMutation struct {
-	Scope       ToolScope `json:"scope"`
-	OperationID string    `json:"operation_id"`
-	Reason      string    `json:"reason"`
-	Details     string    `json:"details,omitempty"`
+	Context     *workflow.HandoffContext `json:"context,omitempty"`
+	Scope       ToolScope                `json:"scope"`
+	OperationID string                   `json:"operation_id"`
+	Reason      string                   `json:"reason"`
+	Details     string                   `json:"details,omitempty"`
 }
 
 // WorkflowMutations performs orchestrator-owned mutations and returns credential-free durable JSON objects.
@@ -114,14 +115,15 @@ func (LedgerWorkflowMutations) RequestReview(_ context.Context, request RequestR
 }
 
 func (LedgerWorkflowMutations) ReportBlocked(_ context.Context, request ReportBlockedMutation) (json.RawMessage, error) {
-	if request.OperationID == "" || strings.TrimSpace(request.Reason) == "" {
+	if request.OperationID == "" || strings.TrimSpace(request.Reason) == "" || request.Context.Validate() != nil {
 		return nil, ErrInvalidInvocation
 	}
 	return json.Marshal(struct {
-		Outcome string `json:"outcome"`
-		Reason  string `json:"reason"`
-		Details string `json:"details,omitempty"`
-	}{"BLOCKED", request.Reason, request.Details})
+		Outcome string                   `json:"outcome"`
+		Reason  string                   `json:"reason"`
+		Details string                   `json:"details,omitempty"`
+		Context *workflow.HandoffContext `json:"context,omitempty"`
+	}{"BLOCKED", request.Reason, request.Details, request.Context})
 }
 
 var _ WorkflowMutations = LedgerWorkflowMutations{}
@@ -638,15 +640,16 @@ func reviewHandoffBody(summary, head string) string {
 
 func (backend *ProductionBackend) reportBlocked(ctx context.Context, invocation Invocation) (json.RawMessage, error) {
 	var arguments struct {
-		Reason  string `json:"reason"`
-		Details string `json:"details"`
+		Context *workflow.HandoffContext `json:"context,omitempty"`
+		Reason  string                   `json:"reason"`
+		Details string                   `json:"details"`
 	}
-	if json.Unmarshal(invocation.Arguments, &arguments) != nil {
+	if json.Unmarshal(invocation.Arguments, &arguments) != nil || arguments.Context.Validate() != nil {
 		return nil, ErrInvalidInvocation
 	}
 	result, err := backend.workflow.ReportBlocked(ctx, ReportBlockedMutation{
 		Scope: cloneToolScope(invocation.Scope), OperationID: invocation.OperationID,
-		Reason: arguments.Reason, Details: arguments.Details,
+		Reason: arguments.Reason, Details: arguments.Details, Context: arguments.Context,
 	})
 	return canonicalWorkflowResult(result, err)
 }
