@@ -43,3 +43,8 @@ func storageLeafSameMount(parent *os.File, name string) error {
 	}
 	return nil
 }
+
+// Atomically refuse collisions, including leaf aliases, without replacing data.
+func storageRenameNoReplace(parent *os.File, name string, root *os.File, destination string) error {
+	return unix.Renameat2(int(parent.Fd()), name, int(root.Fd()), destination, unix.RENAME_NOREPLACE)
+}

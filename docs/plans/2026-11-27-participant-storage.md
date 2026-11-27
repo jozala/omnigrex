@@ -50,10 +50,16 @@ The expanded filesystem collector opens configured ancestors without following l
 Only an exclusively owned tree permits unlinking leaf symlinks; their targets are never followed or chmodded.
 Each attempt has a ten-second deadline, 8192-entry work budget, depth limit of 32 and 128-name enumeration buffers.
 Removal makes durable progress in the filesystem; interrupted or exhausted attempts return errors, and retry starts from remaining entries.
+At the depth bound, the collector atomically renames the validated directory into a random no-replace name inside the same exclusively owned category root, syncs both parent directories and returns incomplete.
+This filesystem-backed checkpoint reduces remaining nesting across retries and process restarts without an unbounded traversal stack, path or descriptor set.
+It creates no new Participant-level target or deletion authority; the original category contains the subtree before and after the atomic move.
+Identity and mount checks still precede traversal, leaf links are never followed, collisions cannot overwrite other entries, and unsupported renames fail closed.
+An interrupted rename leaves the subtree discoverable at its old or new position; no separate cursor publication is needed.
+Renaming is not reported as reclaimed allocation, and required categories must still be absent before finalization.
 Empty Participant directory shells are removed only with non-recursive `rmdir` after their required children are absent.
 There is no migration, completion-record rewrite or new historical authorization API.
 All required category errors propagate before worker finalization.
-Depth/ownership/mount errors need operator investigation rather than an unsafe fallback.
+Ownership/mount errors or unsupported filesystem operations need operator investigation rather than an unsafe fallback; depth exhaustion is normal retryable progress.
 
 Category outcomes report observed allocated blocks for directories and the last observed link of a removed file, never apparent file size.
 Hardlinks are counted only at the last unlink, including across categories; externally retained links are not attributed as reclaimed.

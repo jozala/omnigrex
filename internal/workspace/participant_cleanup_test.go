@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 const cleanupID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -140,7 +142,7 @@ func TestParticipantCollectionBoundedProgressCancellationAndAccounting(t *testin
 	defer parent.Close()
 	budget := 2
 	var bytes int64
-	if err := removeStorageTree(context.Background(), parent, "mise", 0, &budget, &bytes); !errors.Is(err, ErrCleanupIncomplete) {
+	if err := removeStorageTree(context.Background(), parent, "mise", &budget, &bytes); !errors.Is(err, ErrCleanupIncomplete) {
 		t.Fatalf("budget=%v", err)
 	}
 	// Only one of the two links was removed, so no file blocks can be attributed yet.
@@ -240,5 +242,108 @@ func TestParticipantCollectionRejectsCaptureRootAliasBeforeDeletion(t *testing.T
 	}
 	if _, err := os.Stat(foreign); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParticipantCollectionDeepTreeRetryAfterRestart(t *testing.T) {
+	l, root := cleanupFixture(t)
+	tree := filepath.Join(root, "tools", "assignment-"+cleanupID, "mise")
+	deep := tree
+	for range 96 {
+		deep = filepath.Join(deep, "nested")
+	}
+	cleanupFile(t, filepath.Join(deep, "file"))
+	outside := filepath.Join(root, "neighbor", "keep")
+	cleanupFile(t, outside)
+	if err := os.Symlink(filepath.Dir(outside), filepath.Join(deep, "link")); err != nil {
+		t.Fatal(err)
+	}
+	// A bounded attempt may stop, but must leave progress that a new Lifecycle
+	// can discover without an in-memory traversal stack or weakened validation.
+	for attempt := 0; attempt < 8; attempt++ {
+		err := l.CleanupAssignmentToolPaths(context.Background(), cleanupID)
+		if err == nil {
+			if attempt == 0 {
+				t.Fatal("deep fixture did not exercise a bounded retry")
+			}
+			if _, err := os.Lstat(tree); !os.IsNotExist(err) {
+				t.Fatalf("tree remains: %v", err)
+			}
+			if content, err := os.ReadFile(outside); err != nil || string(content) != "retained" {
+				t.Fatalf("neighbor changed: %q %v", content, err)
+			}
+			return
+		}
+		if !errors.Is(err, ErrCleanupIncomplete) {
+			t.Fatal(err)
+		}
+		var newErr error
+		l, newErr = New(Options{WorkspaceRoot: l.workspaceRoot, PublicationRoot: l.publicationRoot, MiseRoot: l.miseRoot})
+		if newErr != nil {
+			t.Fatal(newErr)
+		}
+	}
+	t.Fatal("deep owned tree made no eventual progress across restarts")
+}
+
+func TestStorageCheckpointRejectsIdentityReplacement(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "tree"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := openStorageRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	original, err := openStorageChild(parent, "tree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(original.Fd()), &stat); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, "tree"), filepath.Join(root, "saved")); err != nil {
+		t.Fatal(err)
+	}
+	cleanupFile(t, filepath.Join(root, "tree", "keep"))
+	if err := checkpointStorageDirectory(context.Background(), parent, "tree", parent, stat); !errors.Is(err, ErrUnsafeAssignmentPath) {
+		t.Fatalf("identity replacement accepted: %v", err)
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "tree", "keep")); err != nil || string(content) != "retained" {
+		t.Fatalf("replacement changed: %q %v", content, err)
+	}
+}
+
+func TestStorageCheckpointRenameNeverReplacesDestination(t *testing.T) {
+	root := t.TempDir()
+	cleanupFile(t, filepath.Join(root, "source", "keep"))
+	cleanupFile(t, filepath.Join(root, "destination", "keep"))
+	parent, err := openStorageRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	if err := storageRenameNoReplace(parent, "source", parent, "destination"); !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("destination replaced: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := storageRenameNoReplace(parent, "source", parent, "empty"); !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("empty destination replaced: %v", err)
+	}
+	if err := os.Symlink("destination", filepath.Join(root, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := storageRenameNoReplace(parent, "source", parent, "alias"); !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("destination alias replaced: %v", err)
+	}
+	for _, name := range []string{"source", "destination"} {
+		if content, err := os.ReadFile(filepath.Join(root, name, "keep")); err != nil || string(content) != "retained" {
+			t.Fatalf("%s changed: %q %v", name, content, err)
+		}
 	}
 }

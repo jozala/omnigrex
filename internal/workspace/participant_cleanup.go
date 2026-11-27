@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/uuidtext"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -167,7 +169,7 @@ func (lifecycle *Lifecycle) cleanupParticipantStorage(ctx context.Context, id st
 		result := StorageOutcome{ParticipantID: id, Category: target.category, Status: "absent", Measurement: "observed-last-links; physical release unknown"}
 		parent, err := openStorageRoot(target.root)
 		if err == nil {
-			err = removeStorageTree(ctx, parent, target.name, 0, &budget, &result.AllocatedBytes)
+			err = removeStorageTree(ctx, parent, target.name, &budget, &result.AllocatedBytes)
 			parent.Close()
 		}
 		if os.IsNotExist(err) {
@@ -291,13 +293,17 @@ func openStorageChild(parent *os.File, name string) (*os.File, error) {
 	return child, nil
 }
 
-// Depth, enumeration buffers, descriptors, work and time are bounded. Removed
-// entries are durable progress; a fresh attempt starts at the remaining tree.
-func removeStorageTree(ctx context.Context, parent *os.File, name string, depth int, budget *int, bytes *int64) error {
+// Depth, enumeration buffers, descriptors, work and time are bounded. Removal
+// and same-category checkpoints are discoverable progress across process restart.
+func removeStorageTree(ctx context.Context, parent *os.File, name string, budget *int, bytes *int64) error {
+	return removeStorageTreeAt(ctx, parent, name, nil, 0, budget, bytes)
+}
+
+func removeStorageTreeAt(ctx context.Context, parent *os.File, name string, root *os.File, depth int, budget *int, bytes *int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if depth >= 32 || *budget <= 0 {
+	if *budget <= 0 {
 		return ErrCleanupIncomplete
 	}
 	*budget--
@@ -309,6 +315,12 @@ func removeStorageTree(ctx context.Context, parent *os.File, name string, depth 
 	var original unix.Stat_t
 	if err := unix.Fstat(int(directory.Fd()), &original); err != nil {
 		return err
+	}
+	if root == nil {
+		root = directory
+	}
+	if depth >= 32 {
+		return checkpointStorageDirectory(ctx, parent, name, root, original)
 	}
 	for {
 		names, readErr := directory.Readdirnames(128)
@@ -330,7 +342,7 @@ func removeStorageTree(ctx context.Context, parent *os.File, name string, depth 
 				return ErrUnsafeAssignmentPath
 			}
 			if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
-				if err := removeStorageTree(ctx, directory, child, depth+1, budget, bytes); err != nil {
+				if err := removeStorageTreeAt(ctx, directory, child, root, depth+1, budget, bytes); err != nil {
 					return err
 				}
 			} else {
@@ -370,6 +382,51 @@ func removeStorageTree(ctx context.Context, parent *os.File, name string, depth 
 	return nil
 }
 
+// Move an already-validated deep directory to the same exclusively owned
+// category root. This reduces remaining nesting without keeping unbounded paths,
+// stacks or descriptors, and without introducing a new top-level cleanup target.
+// A crash leaves the directory at either location inside the authorized tree.
+func checkpointStorageDirectory(ctx context.Context, parent *os.File, name string, root *os.File, original unix.Stat_t) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var current unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if current.Dev != original.Dev || current.Ino != original.Ino || current.Mode&unix.S_IFMT != unix.S_IFDIR || int(current.Uid) != os.Geteuid() {
+		return ErrUnsafeAssignmentPath
+	}
+	for range 4 {
+		id, err := uuidtext.NewRandom()
+		if err != nil {
+			return err
+		}
+		destination := ".collection-" + id
+		err = storageRenameNoReplace(parent, name, root, destination)
+		if errors.Is(err, unix.EEXIST) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := unix.Fstatat(int(root.Fd()), destination, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return err
+		}
+		if current.Dev != original.Dev || current.Ino != original.Ino {
+			return ErrUnsafeAssignmentPath
+		}
+		if err := root.Sync(); err != nil {
+			return err
+		}
+		if err := parent.Sync(); err != nil {
+			return err
+		}
+		return ErrCleanupIncomplete
+	}
+	return ErrCleanupIncomplete
+}
+
 // RemoveRetainedStorageTree is the backend retained-state collection primitive.
 // The caller must validate its exact state binding and hold collection exclusion.
 // Only categories whose existing contract permits a root link may unlink it;
@@ -406,7 +463,7 @@ func RemoveRetainedStorageTree(ctx context.Context, path string, allowRootLink b
 	}
 	budget := 8192
 	var bytes int64
-	return removeStorageTree(ctx, parent, name, 0, &budget, &bytes)
+	return removeStorageTree(ctx, parent, name, &budget, &bytes)
 }
 
 // ValidateRetainedStorageRoot verifies the configured backend mount even when a

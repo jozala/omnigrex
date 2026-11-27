@@ -83,7 +83,7 @@ New filesystem categories use bounded no-follow traversal and repair only owned 
 Host preparation, publication and initialization writers share physical exclusion with collection, including inherited locks in trusted Git subprocesses.
 Before enabling this collector, drain and stop every prior-version orchestrator and confirm its host-side Git children have exited.
 Deploy the writer and collector changes together on all orchestrators sharing these volumes; do not run mixed versions.
-The backing filesystem must provide shared advisory file locks and Linux mount-identity reporting, and the orchestrator must own the configured directories.
+The backing filesystem must provide shared advisory file locks, Linux mount-identity reporting and atomic no-replace directory renames, and the orchestrator must own the configured directories.
 The installation-owned `.participant-storage-locks` control files intentionally remain; never delete or replace them while an orchestrator or Git child might be using them.
 Do not manually recreate old-Participant directories after collection begins.
 Fresh Assignment Generations use different identities.
@@ -94,7 +94,10 @@ Shared extents, external hardlinks and open handles can delay or prevent physica
 A partial result is never proof of full collection.
 Transient failures use existing collection retries; exhausted retries enter the existing Human Handoff recovery flow.
 After interruption, resolve permission/ownership/mount problems through the normal operator recovery procedure and retry the existing Work Item, rather than editing SQL or marking the generation collected.
-Unknown entries and depth limits require investigation; do not rename them into a recognized category to bypass ownership validation.
+Deep owned trees make restart-safe progress by atomically moving a validated subtree to a collision-protected `.collection-<random ID>` name inside the same authorized category before returning a retryable incomplete result.
+These checkpoints need no special operator action or in-memory cursor; retries validate and remove them as ordinary category contents.
+A checkpoint does not itself reclaim bytes, and collection remains incomplete until every category is absent.
+Unknown entries outside authorized categories, ownership/mount failures and unsupported filesystem operations require investigation; do not rename them into a recognized category to bypass ownership validation.
 
 Removed toolchains/caches regenerate only for fresh Participants or during their normal working-revision tool provisioning, potentially requiring registry/package-network access.
 Do not prune exact images required by retained Sessions to make space.

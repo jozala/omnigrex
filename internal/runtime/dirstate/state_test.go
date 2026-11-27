@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/jozala/omnigrex/internal/runtime/execution"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 type logCollectionSource struct {
@@ -138,4 +139,51 @@ func TestCollectRefusesConfiguredRootAliasEvenWhenParticipantAbsent(t *testing.T
 	if err := state.Collect(context.Background(), source.ref); err == nil {
 		t.Fatal("configured root alias certified absent Participant data")
 	}
+}
+
+func TestCollectDeepRetainedTreesRetryAfterRestart(t *testing.T) {
+	state, source, parent := collectionFixture(t)
+	source.allowed = true
+	for _, category := range []string{"runtime-state", "runtime-logs", ".restore-" + strings.Repeat("a", 32)} {
+		deep := filepath.Join(parent, category)
+		for range 70 {
+			deep = filepath.Join(deep, "nested")
+		}
+		if err := os.MkdirAll(deep, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(deep, "file"), []byte("retained"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	neighbor := filepath.Join(state.root, "assignment-20000000-0000-4000-8000-000000000001", "runtime-state", "keep")
+	if err := os.MkdirAll(filepath.Dir(neighbor), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(neighbor, []byte("protected"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 16; attempt++ {
+		err := state.Collect(context.Background(), source.ref)
+		if err == nil {
+			if attempt == 0 {
+				t.Fatal("deep fixture did not exercise bounded retry")
+			}
+			if _, err := os.Lstat(parent); !os.IsNotExist(err) {
+				t.Fatalf("retained categories remain: %v", err)
+			}
+			if content, err := os.ReadFile(neighbor); err != nil || string(content) != "protected" {
+				t.Fatalf("neighbor changed: %q %v", content, err)
+			}
+			return
+		}
+		if !errors.Is(err, workspace.ErrCleanupIncomplete) {
+			t.Fatal(err)
+		}
+		state, err = New(state.root, source.ref.Backend, source)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatal("deep retained trees made no eventual progress across restarts")
 }
