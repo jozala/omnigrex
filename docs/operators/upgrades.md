@@ -20,6 +20,12 @@ The updated orchestrator records PR association independently of review readines
 Deploying it does not reopen completed settlements, reset failed reconciliation deliveries, repair historical Workflows, or authorize new work in existing Human Handoffs.
 Historical repair requires separate authorization; never reset the database or delete retained state to bypass this boundary.
 
+A later Developer Turn with a verified recovered open-PR binding also records the association at stopped/drained settlement, even when it blocks without requesting review.
+Settlement follows the exact linked source publication evidence and retains the original opening head and subsequent publication edges; it does not adopt a PR from webhook identity alone.
+If that recovered evidence is missing, incomplete, or contradictory, a permitted blocked/failure settlement keeps its original explanation and Human Handoff without recording an association.
+Its durable settlement result includes a separate `publication_association_diagnostic` for investigation.
+Ordinary Issue reactivation cannot repair missing publication history; there is no supported manual adoption/evidence-repair command, and any repair mechanism or historical incident repair needs separately authorized work.
+
 ## Orchestrator-only upgrade
 
 An ordinary orchestrator-only upgrade leaves the checked-in Pi bundle selection, installation Pi digest/platform, and repository development-image pins unchanged.

@@ -72,24 +72,25 @@ type AgentTurnSettlementObservation struct {
 
 // AgentTurnSettlement is the durable result of atomically applying and finalizing one turn epoch.
 type AgentTurnSettlement struct {
-	ID                    string                       `json:"id"`
-	WorkflowID            string                       `json:"workflow_id"`
-	AgentTurnID           string                       `json:"agent_turn_id"`
-	ExecutionEpoch        int64                        `json:"execution_epoch"`
-	Authority             AgentTurnSettlementAuthority `json:"authority"`
-	RecoveryJobID         string                       `json:"recovery_job_id,omitempty"`
-	RecoveryJobKind       string                       `json:"recovery_job_kind,omitempty"`
-	Disposition           workflow.Disposition         `json:"disposition"`
-	Reason                workflow.Reason              `json:"reason"`
-	State                 workflow.State               `json:"state"`
-	Revision              uint64                       `json:"revision"`
-	TerminalStatus        AgentTurnStatus              `json:"terminal_status"`
-	ChangeProposalID      string                       `json:"change_proposal_id,omitempty"`
-	PendingEventCount     uint32                       `json:"pending_event_count"`
-	LatestObservedHeadSHA string                       `json:"latest_observed_head_sha,omitempty"`
-	SuccessorJobID        string                       `json:"successor_job_id,omitempty"`
-	ReconciliationJobID   string                       `json:"reconciliation_job_id,omitempty"`
-	SettledAt             time.Time                    `json:"settled_at"`
+	ID                               string                       `json:"id"`
+	PublicationAssociationDiagnostic string                       `json:"publication_association_diagnostic,omitempty"`
+	WorkflowID                       string                       `json:"workflow_id"`
+	AgentTurnID                      string                       `json:"agent_turn_id"`
+	ExecutionEpoch                   int64                        `json:"execution_epoch"`
+	Authority                        AgentTurnSettlementAuthority `json:"authority"`
+	RecoveryJobID                    string                       `json:"recovery_job_id,omitempty"`
+	RecoveryJobKind                  string                       `json:"recovery_job_kind,omitempty"`
+	Disposition                      workflow.Disposition         `json:"disposition"`
+	Reason                           workflow.Reason              `json:"reason"`
+	State                            workflow.State               `json:"state"`
+	Revision                         uint64                       `json:"revision"`
+	TerminalStatus                   AgentTurnStatus              `json:"terminal_status"`
+	ChangeProposalID                 string                       `json:"change_proposal_id,omitempty"`
+	PendingEventCount                uint32                       `json:"pending_event_count"`
+	LatestObservedHeadSHA            string                       `json:"latest_observed_head_sha,omitempty"`
+	SuccessorJobID                   string                       `json:"successor_job_id,omitempty"`
+	ReconciliationJobID              string                       `json:"reconciliation_job_id,omitempty"`
+	SettledAt                        time.Time                    `json:"settled_at"`
 }
 
 type canonicalSettlementObservation struct {
@@ -181,8 +182,9 @@ func (store *Store) SettleAgentTurn(ctx context.Context, lease AgentTurnLease, o
 	}
 
 	var publicationProof *settlementPublication
+	var publicationDiagnostic string
 	if compatible {
-		publicationProof, err = deriveSettlementPublicationTx(ctx, tx, job, turn, role, snapshot, canonicalObservation.ChangeProposal)
+		publicationProof, publicationDiagnostic, err = settlementPublicationForOutcomeTx(ctx, tx, job, turn, role, snapshot, canonicalObservation.ChangeProposal, canonicalObservation.Outcome)
 		if err != nil {
 			return AgentTurnSettlement{}, err
 		}
@@ -275,6 +277,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'LIVE', $9, $10, $11, $12, $13, $14,
 		return AgentTurnSettlement{}, fmt.Errorf("timestamp Agent Turn settlement: %w", err)
 	}
 	result.SettledAt = result.SettledAt.UTC()
+	result.PublicationAssociationDiagnostic = publicationDiagnostic
 	resultJSON, err := encodeSettlementResult(result, publicationProof)
 	if err != nil {
 		return AgentTurnSettlement{}, fmt.Errorf("encode Agent Turn settlement result: %w", err)
@@ -488,8 +491,9 @@ WHERE execution.id = $1 AND execution.kind = 'RUN_AGENT_TURN'
 		return false, fmt.Errorf("generate recovered Agent Turn settlement identity: %w", err)
 	}
 	var publicationProof *settlementPublication
+	var publicationDiagnostic string
 	if reducer.DefinitionCompatible(snapshot) {
-		publicationProof, err = deriveSettlementPublicationTx(ctx, tx, authority, turn, role, snapshot, nil)
+		publicationProof, publicationDiagnostic, err = settlementPublicationForOutcomeTx(ctx, tx, authority, turn, role, snapshot, nil, outcome)
 		if err != nil {
 			return false, err
 		}
@@ -566,6 +570,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		return false, fmt.Errorf("timestamp recovered Agent Turn settlement: %w", err)
 	}
 	result.SettledAt = result.SettledAt.UTC()
+	result.PublicationAssociationDiagnostic = publicationDiagnostic
 	resultJSON, err := encodeSettlementResult(result, publicationProof)
 	if err != nil {
 		return false, fmt.Errorf("encode recovered Agent Turn settlement result: %w", err)

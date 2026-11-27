@@ -231,8 +231,9 @@ WHERE id = $1 AND workflow_id = $2 AND status = 'ACTIVE'`,
 		return AgentTurnSettlement{}, err
 	}
 	var publicationProof *settlementPublication
+	var publicationDiagnostic string
 	if compatible {
-		publicationProof, err = deriveSettlementPublicationTx(ctx, tx, job, turn, role, snapshot, canonical.ChangeProposal)
+		publicationProof, publicationDiagnostic, err = settlementPublicationForOutcomeTx(ctx, tx, job, turn, role, snapshot, canonical.ChangeProposal, canonical.Outcome)
 		if err != nil {
 			return AgentTurnSettlement{}, err
 		}
@@ -325,6 +326,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'RECOVERY', $9, $10, $11, $12, $13,
 		return AgentTurnSettlement{}, err
 	}
 	result.SettledAt = result.SettledAt.UTC()
+	result.PublicationAssociationDiagnostic = publicationDiagnostic
 	resultJSON, err := encodeSettlementResult(result, publicationProof)
 	if err != nil {
 		return AgentTurnSettlement{}, err
