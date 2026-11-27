@@ -542,17 +542,19 @@ func reconcileReportBlocked(reconciliation store.AgentTurnMutationReconciliation
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	var request struct {
-		Reason  string `json:"reason"`
-		Details string `json:"details"`
+		Context *workflow.HandoffContext `json:"context,omitempty"`
+		Reason  string                   `json:"reason"`
+		Details string                   `json:"details"`
 	}
-	if !decodePersistedRequest(mutation.Request, &request) || strings.TrimSpace(request.Reason) == "" {
+	if !decodePersistedRequest(mutation.Request, &request) || strings.TrimSpace(request.Reason) == "" || request.Context.Validate() != nil {
 		return MutationReconciliationResult{}, ErrInvalidMutationReconciliation
 	}
 	result, err := json.Marshal(struct {
-		Outcome string `json:"outcome"`
-		Reason  string `json:"reason"`
-		Details string `json:"details,omitempty"`
-	}{"BLOCKED", request.Reason, request.Details})
+		Outcome string                   `json:"outcome"`
+		Reason  string                   `json:"reason"`
+		Details string                   `json:"details,omitempty"`
+		Context *workflow.HandoffContext `json:"context,omitempty"`
+	}{"BLOCKED", request.Reason, request.Details, request.Context})
 	if err != nil {
 		return MutationReconciliationResult{}, dependencyError("encode blocked result")
 	}

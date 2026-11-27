@@ -11,39 +11,92 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jozala/omnigrex/internal/agentturn"
 	"github.com/jozala/omnigrex/internal/github"
+	"github.com/jozala/omnigrex/internal/mcp"
+	"github.com/jozala/omnigrex/internal/runtime/agent"
 	"github.com/jozala/omnigrex/internal/store"
 	"github.com/jozala/omnigrex/internal/workflow"
+	"github.com/jozala/omnigrex/internal/workspace"
 )
 
 // These fixtures use the real settlement, deferred-event replay, job fences,
 // and publication/cleanup workers. Remote calls are an in-memory GitHub boundary.
 func TestBlockedHandoffConvergesAcrossDeferredSynchronization(t *testing.T) {
-	for _, boundary := range []string{"before publication", "two revisions before publication", "after Issue comment", "after PR comment"} {
+	const publishedHead = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	for _, boundary := range []string{"before publication", "two revisions before publication", "after Issue comment", "after PR comment", "publish then block"} {
 		t.Run(boundary, func(t *testing.T) {
-			databases, pool := openPhaseFiveStores(t, 1)
+			databases, pool := openPhaseFiveStores(t, 2)
 			database := databases[0]
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			fixture, lease, proposal := prepareSettlementTurn(t, database, pool, ctx, 950, workflow.RoleDeveloper, "head-a")
+			fixture, lease, proposal := prepareOpenSettlementTurn(t, database, pool, ctx, 950, workflow.RoleDeveloper, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 			if _, err := pool.Exec(ctx, `UPDATE workflows SET issue_number = 951 WHERE id = $1`, fixture.workflowID); err != nil {
 				t.Fatal(err)
 			}
+			trackedHead := "head-b"
+			if boundary == "publish then block" {
+				trackedHead = publishedHead
+			}
 			insertDeferredSettlementNormalizedEvent(t, pool, ctx, fixture.workflowID, lease.ID, deferredSettlementEvent{
 				deliveryID: "78950000-0000-4000-8000-000000000001", eventName: "pull_request", action: "synchronize",
-				beforeSHA: proposal.HeadSHA, headSHA: "head-b", createdAt: time.Now().UTC(),
+				beforeSHA: proposal.HeadSHA, headSHA: trackedHead, createdAt: time.Now().UTC(),
 			})
-			if boundary == "two revisions before publication" {
+			if boundary == "two revisions before publication" || boundary == "publish then block" {
 				insertDeferredSettlementNormalizedEvent(t, pool, ctx, fixture.workflowID, lease.ID, deferredSettlementEvent{
 					deliveryID: "78950000-0000-4000-8000-000000000003", eventName: "pull_request", action: "synchronize",
-					beforeSHA: "head-b", headSHA: "head-c", createdAt: time.Now().UTC(),
+					beforeSHA: trackedHead, headSHA: "head-c", createdAt: time.Now().UTC(),
 				})
 			}
-			observation := successfulSettlementObservation(workflow.TurnOutcomeBlocked, nil)
-			observation.Diagnostic = "distinctive current blocker: external qualification required"
+			execution, err := database.GetAgentTurnExecutionContext(ctx, lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			publisher := &replayGatewayPublisher{results: []workspace.PublicationResult{{Head: publishedHead, Changed: true}}}
+			backend, err := mcp.NewProductionBackend(mcp.ProductionBackendConfig{GitHub: &replayGatewayGitHub{}, Credentials: replayGatewayCredentials{}, Publisher: publisher, Workflow: mcp.LedgerWorkflowMutations{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope := replayGatewayScope(lease, execution, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			scope.PullRequest = &mcp.PullRequestScope{ID: proposal.PullRequestID, Number: proposal.PullRequestNumber}
+			scope.Branch = proposal.HeadRef
+			gateway, registration := openReplayGateway(t, database, backend, scope)
+			sourceHead := proposal.HeadSHA
+			if boundary == "publish then block" {
+				callReplayGatewayTool(t, gateway, registration, mcp.ToolPublishChanges, map[string]any{"operation_id": "publish-before-block"}, false)
+				sourceHead = publishedHead
+			}
+			contextReport := &workflow.HandoffContext{Explanation: "The fix is published.\n\nQualification remains incomplete.", Intervention: "Maintainer:\n- [Rerun Docker](https://example.test/docker)\n- [Rerun Linux](https://example.test/linux)", CompletedWork: "Implemented fix.", Observations: "Reported package-download failures.", Uncertainty: "Other failures remain possible.", Evidence: "Supporting test evidence."}
+			contextReport = contextReport.Map(func(text string) string { return text + "\n\nsynthetic-\u200bprovider-secret" })
+			callReplayGatewayTool(t, gateway, registration, mcp.ToolReportBlocked, map[string]any{"operation_id": "blocker-context", "reason": "distinctive current blocker", "details": "external qualification required", "context": contextReport}, false)
+			if err := gateway.CloseAndDrain(ctx, registration); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CloseMutationAdmission(ctx, lease); err != nil {
+				t.Fatal(err)
+			}
+			database = databases[1] // No backend-local state survives settlement/read-back.
+			credential := &integrationCredentialProvider{credential: "fixture-token"}
+			outcomes, err := agentturn.NewOutcomeReconciler(agentturn.OutcomeReconcilerConfig{Store: database, GitHub: &replayOutcomeGitHub{}, Workspace: newIntegrationOutcomeWorkspace(t), DeveloperCredentials: credential, ReviewerCredentials: credential, ProviderCredentialJSON: []json.RawMessage{json.RawMessage(`{"provider":{"apiKey":"synthetic-provider-secret"}}`)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := outcomes.Reconcile(ctx, agentturn.OutcomeReconciliation{Lease: lease, Execution: execution, PromptResponse: &agent.Outcome{Admitted: true, Status: agent.Completed}})
+			if err != nil || observation.HandoffContext == nil {
+				t.Fatalf("context reconciliation = %#v, %v", observation, err)
+			}
+
 			settled, err := database.SettleAgentTurn(ctx, lease, observation)
 			if err != nil || settled.State != workflow.StateNeedsHuman || settled.ReconciliationJobID == "" {
 				t.Fatalf("blocked settlement = (%#v, %v)", settled, err)
+			}
+			var frozenHead string
+			if err := pool.QueryRow(ctx, `SELECT expected_head_sha FROM agent_turns WHERE id=$1`, lease.ID).Scan(&frozenHead); err != nil || frozenHead != proposal.HeadSHA {
+				t.Fatalf("frozen head changed: %s, %v", frozenHead, err)
+			}
+			var recordedSource string
+			if err := pool.QueryRow(ctx, `SELECT payload->>'source_head_sha' FROM jobs WHERE workflow_id=$1 AND kind='PUBLISH_HUMAN_HANDOFF' AND payload->>'revision'=$2`, fixture.workflowID, fmt.Sprint(settled.Revision)).Scan(&recordedSource); err != nil || recordedSource != sourceHead {
+				t.Fatalf("durable source head = %s, %v; want %s", recordedSource, err, sourceHead)
 			}
 			// A later safety diagnostic with the same reason and revision must
 			// never become the carried normal explanation.
@@ -76,7 +129,7 @@ FROM workflows w JOIN change_proposals p ON p.workflow_id = w.id AND p.active WH
 					t.Fatal(err)
 				}
 				wantRevision, wantHead := settled.Revision+1, "head-b"
-				if boundary == "two revisions before publication" {
+				if boundary == "two revisions before publication" || boundary == "publish then block" {
 					wantRevision, wantHead = settled.Revision+2, "head-c"
 				}
 				if state != "NEEDS_HUMAN" || revision != wantRevision || reason != "agent_blocked" || head != wantHead {
@@ -84,7 +137,7 @@ FROM workflows w JOIN change_proposals p ON p.workflow_id = w.id AND p.active WH
 				}
 			}
 			api := &handoffFixtureAPI{comments: map[int][]github.IssueComment{951: {{ID: 1, Body: "human Issue comment"}}, 950: {{ID: 2, Body: "human PR comment"}}}, nextID: 10}
-			if boundary == "before publication" || boundary == "two revisions before publication" {
+			if boundary == "before publication" || boundary == "two revisions before publication" || boundary == "publish then block" {
 				replay()
 			} else {
 				api.afterCreate = func(number int) {
@@ -114,7 +167,13 @@ FROM workflows w JOIN change_proposals p ON p.workflow_id = w.id AND p.active WH
 			}
 			for _, number := range []int{951, 950} {
 				comments := api.comments[number]
-				if len(comments) != 2 || !strings.HasPrefix(comments[0].Body, "human ") || !strings.Contains(comments[1].Body, observation.Diagnostic) {
+				if len(comments) != 2 || !strings.HasPrefix(comments[0].Body, "human ") || !strings.Contains(comments[1].Body, observation.Diagnostic) ||
+					!strings.Contains(comments[1].Body, "The fix is published.\n\nQualification remains incomplete.") ||
+					!strings.Contains(comments[1].Body, "- [Rerun Docker](https://example.test/docker)") ||
+					!strings.Contains(comments[1].Body, "Source observation head: `"+sourceHead+"`") ||
+					!strings.Contains(comments[1].Body, "Other failures remain possible.") ||
+					!strings.Contains(comments[1].Body, "<details>") ||
+					!strings.Contains(comments[1].Body, "Supporting test evidence.") || strings.Contains(comments[1].Body, "synthetic-provider-secret") || strings.Count(comments[1].Body, `\[REDACTED\]`) != 6 {
 					t.Errorf("artifact %d comments = %#v, want human comment and current explanation", number, comments)
 				}
 			}

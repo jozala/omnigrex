@@ -65,4 +65,4 @@ Runtime-state collection reports unavailable byte measurement rather than a fabr
 The bounded CLI inventory includes uncollected ledger roots (including COLLECTING), the current deployment image and repeatable explicit provisioning/pinning roots.
 It reports native inventory dimensions as unsupported rather than inferring candidates from absence.
 Complete provenance, aliases and shared references remain unknown, so all native resources are retained and apply refuses before backend access.
-See the [tracked dependency](../dependencies/microsandbox-safe-image-gc.md) and [policy decision](../decisions/0071-fail-closed-native-image-maintenance.md).
+See the [tracked dependency](../dependencies/microsandbox-safe-image-gc.md) and [policy decision](../decisions/0073-fail-closed-native-image-maintenance.md).

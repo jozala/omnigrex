@@ -6,6 +6,20 @@ For ordinary agent questions, use [clarification](clarification.md), which prese
 A Human Handoff means autonomous progress has stopped and a person must resolve the reported condition.
 Start with the `omnigrex:needs-human` explanation on the Issue rather than repeatedly adding the command label.
 
+## Read the explanation
+
+The main comment leads with the stopping condition, proposed human intervention, and supported continuation.
+When available, agent-reported explanation, observations, completed work and material uncertainty are labeled separately.
+Required actions and risks stay visible; supporting evidence and technical diagnostics are expandable.
+Reported diagnoses are not independent proof that other failures cannot exist.
+The Orchestrator supplies the Work Item/current Change Proposal association and tracked head.
+When the tracked head has moved, the source observation head remains separate: earlier test claims do not qualify the newer revision.
+
+Older persisted handoffs and infrastructure/budget failures may have no contextual report.
+Their comments use the known stopping condition and troubleshooting guides without inventing an owner, completed work or root cause.
+A bounded legacy diagnostic excerpt is explicitly labeled when the entire diagnostic cannot be published.
+Operational safety reports do not establish that a Workflow is stopped or eligible for reactivation; follow the linked operator procedure instead.
+
 ## Find the responsible person
 
 | Reported condition | Who can usually resolve it |
@@ -24,7 +38,7 @@ Start with the `omnigrex:needs-human` explanation on the Issue rather than repea
 5. Add `omnigrex:run` again to the Issue or current Change Proposal.
 
 This creates a fresh Workflow Attempt and resets retry, review, and CI-repair budgets without erasing history.
-Comments and pushes alone do not reactivate a handed-off Workflow.
+Successful CI, comments and pushes alone do not reactivate a handed-off Workflow.
 Do not edit state labels to simulate progress.
 
 ## When publication succeeded but verification did not

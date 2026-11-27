@@ -1113,10 +1113,10 @@ func TestNormalHandoffDiagnosticsRequireExactRevisionAndExcludeSafetyJobs(t *tes
 	if _, err := pool.Exec(ctx, `UPDATE workflows SET state_revision = 8 WHERE id = $1`, workflowID); err != nil {
 		t.Fatal(err)
 	}
-	currentID := enqueue("current-normal", `{"reason":"agent_blocked","diagnostic":"replacement blocker","revision":8}`)
+	currentID := enqueue("current-normal", `{"reason":"agent_blocked","diagnostic":"replacement blocker","revision":8,"context":{"explanation":"replacement context"},"source_head_sha":"source-head"}`)
 	safetyID := enqueue("current-safety", `{"reason":"agent_blocked","diagnostic":"independent safety report","revision":8,"safety_diagnostic":true}`)
 	current, err := databases[0].GetWorkflowGitHubEffectContext(ctx, *lease)
-	if err != nil || current.JobRevision != 7 || current.Revision != 8 || current.HandoffDiagnostic != "replacement blocker" {
+	if err != nil || current.JobRevision != 7 || current.Revision != 8 || current.HandoffDiagnostic != "replacement blocker" || current.HandoffContext == nil || current.HandoffContext.Explanation != "replacement context" || current.HandoffSourceHeadSHA != "source-head" {
 		t.Fatalf("current explanation = (%#v, %v)", current, err)
 	}
 	ack, err := databases[0].AcknowledgeWorkflowGitHubEffect(ctx, *lease, observed, json.RawMessage(`{}`))
@@ -1139,7 +1139,7 @@ func TestNormalHandoffDiagnosticsRequireExactRevisionAndExcludeSafetyJobs(t *tes
 		t.Fatalf("claim stale replacement = (%#v, %v)", lease, err)
 	}
 	current, err = databases[0].GetWorkflowGitHubEffectContext(ctx, *lease)
-	if err != nil || current.HandoffDiagnostic != "" {
+	if err != nil || current.HandoffDiagnostic != "" || current.HandoffContext != nil || current.HandoffSourceHeadSHA != "" {
 		t.Fatalf("missing current explanation = (%#v, %v)", current, err)
 	}
 }

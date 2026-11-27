@@ -369,7 +369,7 @@ func TestHumanHandoffWorkerSanitizesAndRedactsDiagnostic(t *testing.T) {
 	}
 	request := api.issueRequests[0]
 	if strings.Contains(request.Body, testCredential) || strings.Contains(request.Body, "<!--") || strings.ContainsRune(request.Body, '\x00') ||
-		!strings.Contains(request.Body, "Human handoff required: agent_blocked.") || !strings.Contains(request.Body, "blocked with [REDACTED]") {
+		!strings.Contains(request.Body, "Autonomous work stopped because the agent reported a blocker.") || !strings.Contains(request.Body, `blocked with \[REDACTED\]`) {
 		t.Errorf("unsafe handoff body = %q", request.Body)
 	}
 }

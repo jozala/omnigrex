@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -983,19 +984,21 @@ func parseOpenPullRequestEvidence(mutation store.MutationReservation, repository
 
 func blockedObservation(observedAt time.Time, promptOutcome json.RawMessage, mutation store.MutationReservation, workflowID string) store.AgentTurnSettlementObservation {
 	var arguments struct {
-		OperationID string `json:"operation_id"`
-		Reason      string `json:"reason"`
-		Details     string `json:"details"`
+		OperationID string                   `json:"operation_id"`
+		Reason      string                   `json:"reason"`
+		Details     string                   `json:"details"`
+		Context     *workflow.HandoffContext `json:"context,omitempty"`
 	}
 	var result struct {
-		Outcome string `json:"outcome"`
-		Reason  string `json:"reason"`
-		Details string `json:"details"`
+		Outcome string                   `json:"outcome"`
+		Reason  string                   `json:"reason"`
+		Details string                   `json:"details"`
+		Context *workflow.HandoffContext `json:"context,omitempty"`
 	}
 	if mutation.ExternalService != "omnigrex" || mutation.ExternalResourceID != workflowID || mutation.ExpectedSHA != "" ||
 		!decodeExactObject(mutation.Request, &arguments) || arguments.OperationID != mutation.OperationID ||
 		!decodeExactObject(mutation.Result, &result) || result.Outcome != "BLOCKED" ||
-		strings.TrimSpace(result.Reason) == "" || result.Reason != arguments.Reason || result.Details != arguments.Details {
+		strings.TrimSpace(result.Reason) == "" || result.Reason != arguments.Reason || result.Details != arguments.Details || !reflect.DeepEqual(result.Context, arguments.Context) || result.Context.Validate() != nil {
 		return infrastructureObservation(observedAt, store.AgentTurnFailed, promptOutcome, "report_blocked terminal evidence is malformed or incoherent")
 	}
 	diagnostic := strings.TrimSpace(result.Reason)
@@ -1003,7 +1006,7 @@ func blockedObservation(observedAt time.Time, promptOutcome json.RawMessage, mut
 		diagnostic += ": " + details
 	}
 	return store.AgentTurnSettlementObservation{
-		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic,
+		ObservedAt: observedAt, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, HandoffContext: result.Context,
 		Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: promptOutcome},
 	}
 }
@@ -1170,6 +1173,12 @@ func infrastructureObservation(observedAt time.Time, status store.AgentTurnStatu
 }
 
 func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.AgentTurnSettlementObservation, secrets []string) store.AgentTurnSettlementObservation {
+	// Redact both before and after normalization: the first pass protects raw
+	// provider bundles; the last pass catches credentials reconstructed when
+	// control/format characters are removed. Downstream cleanup is idempotent.
+	observation.HandoffContext = observation.HandoffContext.Map(func(value string) string {
+		return reconciler.redactCredentials(workflow.CleanHandoffText(reconciler.redactCredentials(value, secrets)), secrets)
+	})
 	observation.Diagnostic = reconciler.sanitizeDiagnostic(observation.Diagnostic, secrets)
 	observation.Completion.LastError = reconciler.sanitizeDiagnostic(observation.Completion.LastError, secrets)
 	if observation.Outcome == workflow.TurnOutcomeBlocked && observation.Diagnostic == "" {
@@ -1185,7 +1194,7 @@ func (reconciler *OutcomeReconciler) sanitizeObservation(observation store.Agent
 	return observation
 }
 
-func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []string) string {
+func (reconciler *OutcomeReconciler) redactCredentials(value string, secrets []string) string {
 	if reconciler.providerRedactor != nil {
 		value = reconciler.providerRedactor(value)
 	}
@@ -1195,6 +1204,11 @@ func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []
 			value = strings.ReplaceAll(value, secret, "[REDACTED]")
 		}
 	}
+	return value
+}
+
+func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []string) string {
+	value = reconciler.redactCredentials(value, secrets)
 	value = strings.Map(func(character rune) rune {
 		if unicode.IsControl(character) {
 			return ' '
@@ -1202,6 +1216,9 @@ func (reconciler *OutcomeReconciler) sanitizeDiagnostic(value string, secrets []
 		return character
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
+	// Diagnostics stay flattened. Normalize format characters before the final
+	// redaction too, so publication cleanup cannot reconstruct provider secrets.
+	value = reconciler.redactCredentials(workflow.CleanHandoffText(value), secrets)
 	runes := []rune(value)
 	if len(runes) > maxOutcomeDiagnosticRunes {
 		value = string(runes[:maxOutcomeDiagnosticRunes])
@@ -1345,7 +1362,7 @@ func budgetExhaustionObservation(at time.Time, outcome json.RawMessage, request 
 	_ = json.Unmarshal(outcome, &evidence)
 	evidence.StepBudgetExhausted = true
 	outcome, _ = json.Marshal(evidence)
-	return store.AgentTurnSettlementObservation{ObservedAt: at, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: outcome}}
+	return store.AgentTurnSettlementObservation{ObservedAt: at, Outcome: workflow.TurnOutcomeBlocked, Diagnostic: diagnostic, HandoffContext: &workflow.HandoffContext{Explanation: "The Agent Turn reached its configured step budget before it could complete the required work."}, Completion: store.AgentTurnCompletion{Status: store.AgentTurnSucceeded, Outcome: outcome}}
 }
 
 // Do not append arbitrary PromptDiagnostic to prerequisite Human Handoffs.

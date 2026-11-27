@@ -211,3 +211,58 @@ func encodeSettlementResult(result AgentTurnSettlement, proof *settlementPublica
 		Publication *settlementPublication `json:"publication_association,omitempty"`
 	}{result, proof})
 }
+
+// deriveHandoffSourceHeadTx derives presentation provenance, not association or
+// frozen Turn authority. Initial PR association uses its existing proof; bound
+// PRs use only successful publications in the exact Turn/epoch ledger. Replayed
+// publications behind a repaired retry head cannot rewind the source, matching
+// the publication-read contract. Webhook tips and agent prose are not evidence.
+func deriveHandoffSourceHeadTx(ctx context.Context, tx pgx.Tx, job Job, turn lockedTurn, role workflow.Role, initial *settlementPublication) (string, error) {
+	if initial != nil {
+		return initial.Proposal.HeadSHA, nil
+	}
+	head := turn.ExpectedHeadSHA
+	if role != workflow.RoleDeveloper || turn.ChangeProposalID == "" {
+		return head, nil
+	}
+	var branch string
+	var repositoryID int64
+	if err := tx.QueryRow(ctx, `SELECT head_ref,repository_id FROM change_proposals WHERE id=$1 AND workflow_id=$2`, turn.ChangeProposalID, job.WorkflowID).Scan(&branch, &repositoryID); err != nil {
+		return "", err
+	}
+	rows, err := tx.Query(ctx, mutationLedgerSelect, turn.ID, turn.ExecutionEpoch)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var previous int64
+	for rows.Next() {
+		m, err := scanMutation(rows)
+		if err != nil {
+			return "", err
+		}
+		if m.State != MutationSucceeded || m.ToolName != "publish_changes" {
+			continue
+		}
+		var result struct {
+			Head    string `json:"head"`
+			Branch  string `json:"branch"`
+			Changed *bool  `json:"changed"`
+		}
+		if m.AgentTurnID != turn.ID || m.ExecutionEpoch != turn.ExecutionEpoch || m.InvocationNumber <= previous ||
+			m.ExternalService != "git" || m.ExternalResourceID != fmt.Sprintf("%d:%s", repositoryID, branch) || !publication.Revision(m.ExpectedSHA) ||
+			!decodePublicationResult(m.Result, &result) || result.Changed == nil || !publication.Revision(result.Head) || result.Branch != branch ||
+			*result.Changed && result.Head == m.ExpectedSHA || !*result.Changed && result.Head != m.ExpectedSHA ||
+			m.HistoryPublication && *result.Changed && m.ProposedSHA == "" || m.ProposedSHA != "" && (!*result.Changed || m.ProposedSHA != result.Head) {
+			return "", ErrAgentTurnPublicationConflict
+		}
+		previous = m.InvocationNumber
+		if m.ExpectedSHA == head {
+			head = result.Head
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return head, nil
+}
