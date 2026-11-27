@@ -24,6 +24,10 @@ type captureManifest struct {
 // Capture seals one immutable operation result and preserves it across restart.
 // A retry never overwrites earlier evidence with a later workspace observation.
 func (lifecycle *Lifecycle) Capture(ctx context.Context, request execution.CaptureRequest) (result execution.CaptureRef, err error) {
+	// Preserve capture validation before writer admission or filesystem access.
+	if _, err := lifecycle.capturePath(request); err != nil {
+		return execution.CaptureRef{}, err
+	}
 	err = lifecycle.withStorageWriter(ctx, request.Workspace.Key.AssignmentID, func(ctx context.Context) error {
 		var inner error
 		result, inner = lifecycle.rawCapture(ctx, request)
