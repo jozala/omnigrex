@@ -321,6 +321,16 @@ func receiveSDKEvent(ctx context.Context, meta metadata, handle sdkEventReceiver
 	call := sdkCall("Exec.Recv", meta)
 	record, err := handle.Recv(ctx)
 	if err != nil {
+		// Only transport.Close owns this cause. SDK v0.7.11 maps both
+		// deadlines and cancellation to ErrCancelled, so require its exact
+		// context.Canceled cause too. Do not match wrapped/joined errors:
+		// another failure racing close must retain its diagnostic.
+		if failure, ok := err.(*sdk.Error); ok &&
+			context.Cause(ctx) == errTransportClosed &&
+			failure.Kind == sdk.ErrCancelled && failure.Cause == context.Canceled {
+			// Preserve sdkError's sanitized return without a failure event.
+			return nil, errors.Join(ctx.Err(), fmt.Errorf("Microsandbox SDK operation failed (%s)", failure.Kind.String()))
+		}
 		return nil, sdkError(ctx, call, err)
 	}
 	if record.Kind == sdk.ExecEventFailed || record.Kind == sdk.ExecEventStdinError {
