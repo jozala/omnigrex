@@ -11,11 +11,9 @@ import (
 
 	"github.com/jozala/omnigrex/internal/config"
 	"github.com/jozala/omnigrex/internal/retention"
-	"github.com/jozala/omnigrex/internal/role"
 	"github.com/jozala/omnigrex/internal/runtime/composition"
 	"github.com/jozala/omnigrex/internal/runtime/profile"
 	"github.com/jozala/omnigrex/internal/store"
-	"github.com/jozala/omnigrex/internal/workflow"
 )
 
 type imagePins []string
@@ -87,19 +85,14 @@ func runImageMaintenance(ctx context.Context, args []string, getenv func(string)
 	return 0
 }
 func productionImageInventory(ctx context.Context, settings config.Config, pins []string, limit int) (retention.NativeInventory, error) {
-	definition, err := workflow.NewBuiltinDefinition(role.BuiltinCatalog())
-	if err != nil {
-		return retention.NativeInventory{}, err
-	}
-	reducer, err := workflow.NewReducer(definition, workflow.BuiltinInfrastructureRetryLimit)
-	if err != nil {
-		return retention.NativeInventory{}, err
-	}
-	database, err := store.Open(ctx, settings.DatabaseURL, settings.DatabasePasswordSecretFile, store.Config{Reducer: reducer, Policies: role.BuiltinPolicyCatalog()})
+	database, err := store.OpenReadOnly(ctx, settings.DatabaseURL, settings.DatabasePasswordSecretFile)
 	if err != nil {
 		return retention.NativeInventory{}, err
 	}
 	defer database.Close()
+	if err := database.CheckMigrations(ctx); err != nil {
+		return retention.NativeInventory{}, err
+	}
 	binding := composition.StateBinding(settings)
 	refs, truncated, err := database.ImageMaintenanceRoots(ctx, binding, limit)
 	if err != nil {

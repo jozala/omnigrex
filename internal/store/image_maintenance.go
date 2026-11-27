@@ -8,7 +8,7 @@ import (
 
 // ImageMaintenanceRoots includes COLLECTING Participants, unlike Session
 // availability inventory. This is protection evidence, never deletion authority.
-func (store *Store) ImageMaintenanceRoots(ctx context.Context, binding execution.BackendBinding, limit int) ([]execution.StateRef, bool, error) {
+func (store *ReadOnlyStore) ImageMaintenanceRoots(ctx context.Context, binding execution.BackendBinding, limit int) ([]execution.StateRef, bool, error) {
 	if limit < 1 || limit > 10000 {
 		return nil, false, execution.ErrInvalidSpec
 	}

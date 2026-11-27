@@ -205,11 +205,24 @@ func TestRetainedStateCollectionKeepsNeighborProtectedAndReadinessAvailable(t *t
 	if err := database.RecordNoExecution(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	roots, truncated, err := database.ImageMaintenanceRoots(ctx, binding, 10)
+	// Inventory uses the real read-only facade, never migration-capable Open.
+	passwordFile := filepath.Join(t.TempDir(), "inventory-password")
+	if err := os.WriteFile(passwordFile, []byte(pool.Config().ConnConfig.Password), 0600); err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := store.OpenReadOnly(ctx, pool.Config().ConnConfig.ConnString(), passwordFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inventory.Close()
+	if err := inventory.CheckMigrations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	roots, truncated, err := inventory.ImageMaintenanceRoots(ctx, binding, 10)
 	if err != nil || truncated || len(roots) != 2 {
 		t.Fatalf("COLLECTING image protection: %v %v %v", roots, truncated, err)
 	}
-	if _, _, err := database.ImageMaintenanceRoots(ctx, execution.BackendBinding{Family: "docker", Version: 1, Namespace: "wrong"}, 10); !errors.Is(err, execution.ErrBindingMismatch) {
+	if _, _, err := inventory.ImageMaintenanceRoots(ctx, execution.BackendBinding{Family: "docker", Version: 1, Namespace: "wrong"}, 10); !errors.Is(err, execution.ErrBindingMismatch) {
 		t.Fatal(err)
 	}
 	ref, err := database.CollectionState(ctx, fixture.assignmentID)
